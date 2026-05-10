@@ -17,12 +17,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import struct
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from enum import IntEnum
 from types import TracebackType
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 from .commands import Command, CommandFailedError, SecurityCommandResponse
+
+if TYPE_CHECKING:
+    from .events import SystemEvent
 from .connection import (
     ConnectionError as OmniConnectionError,
 )
@@ -714,6 +717,27 @@ class OmniClient:
         self._subscriber_task = asyncio.create_task(
             _runner(), name="omni-client-subscriber"
         )
+
+    def events(self) -> AsyncIterator[SystemEvent]:
+        """Async iterator over typed :class:`SystemEvent` push notifications.
+
+        Built on top of :meth:`OmniConnection.unsolicited` and
+        :class:`omni_pca.events.EventStream`. Filters out non-SystemEvents
+        unsolicited messages, parses each SystemEvents (opcode 55) message
+        into one or more typed events, and yields them one at a time.
+
+        Usage::
+
+            async for event in client.events():
+                match event:
+                    case ZoneStateChanged() if event.is_open:
+                        ...
+                    case ArmingChanged():
+                        ...
+        """
+        from .events import EventStream
+
+        return EventStream(self._conn).__aiter__()
 
     # ---- helpers ---------------------------------------------------------
 
