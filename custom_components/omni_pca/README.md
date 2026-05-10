@@ -6,7 +6,7 @@ opens an encrypted session straight to the panel and listens for unsolicited
 push messages.
 
 This integration is the HA-facing wrapper around the
-[`omni-pca`](https://github.com/rsp2k/omni-pca) Python library; the library
+[`omni-pca`](https://git.supported.systems/warehack.ing/omni-pca) Python library; the library
 handles the wire protocol, this component surfaces it as HA entities.
 
 ## Install
@@ -14,7 +14,7 @@ handles the wire protocol, this component surfaces it as HA entities.
 ### HACS (recommended once published)
 
 1. HACS → Integrations → custom repository → add
-   `https://github.com/rsp2k/omni-pca`, category **Integration**.
+   `https://git.supported.systems/warehack.ing/omni-pca`, category **Integration**.
 2. Install **HAI / Leviton Omni Panel**, then restart Home Assistant.
 
 ### Manual
@@ -121,6 +121,6 @@ hashed) — useful for bug reports.
 - **No entities for X**: only objects with a name configured on the panel
   are discovered. PC Access's "Names" page is where they live.
 
-See the [parent README](https://github.com/rsp2k/omni-pca) for protocol /
+See the [parent README](https://git.supported.systems/warehack.ing/omni-pca) for protocol /
 library details. Detailed reverse-engineering notes are in
-[`docs/JOURNEY.md`](https://github.com/rsp2k/omni-pca/blob/main/docs/JOURNEY.md).
+[`docs/JOURNEY.md`](https://git.supported.systems/warehack.ing/omni-pca/blob/main/docs/JOURNEY.md).

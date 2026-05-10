@@ -7,7 +7,7 @@
     "dependencies": [],
     "codeowners": ["@rsp2k"],
     "requirements": ["omni-pca==2026.5.10"],
-    "documentation": "https://github.com/rsp2k/omni-pca",
-    "issue_tracker": "https://github.com/rsp2k/omni-pca/issues",
+    "documentation": "https://git.supported.systems/warehack.ing/omni-pca",
+    "issue_tracker": "https://git.supported.systems/warehack.ing/omni-pca/issues",
     "integration_type": "hub"
 }

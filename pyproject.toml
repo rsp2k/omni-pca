@@ -29,7 +29,7 @@ cli = ["rich>=13.9.0", "typer>=0.15.0"]
 omni-pca = "omni_pca.__main__:main"
 
 [project.urls]
-Repository = "https://github.com/rsp2k/omni-pca"
+Repository = "https://git.supported.systems/warehack.ing/omni-pca"
 
 [build-system]
 requires = ["uv_build>=0.11.8,<0.12.0"]
