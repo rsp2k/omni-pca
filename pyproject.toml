@@ -56,7 +56,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "custom_components"]
 
 [tool.ruff.lint]
 select = [

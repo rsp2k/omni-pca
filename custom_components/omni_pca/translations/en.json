@@ -1,0 +1,32 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Connect to your Omni panel",
+                "description": "Enter the IP/hostname of your HAI/Leviton Omni Pro II controller and the 32-character hex Controller Key. Use `omni-pca decode-pca <file>.pca --field controller_key` to extract the key from a PC Access export.",
+                "data": {
+                    "host": "Host",
+                    "port": "Port",
+                    "controller_key": "Controller Key (32 hex chars)"
+                }
+            },
+            "reauth_confirm": {
+                "title": "Re-enter Controller Key",
+                "description": "The panel at {host}:{port} rejected the saved key. Paste the new 32-character hex Controller Key.",
+                "data": {
+                    "controller_key": "Controller Key (32 hex chars)"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Could not reach the panel. Check the host, port, and that TCP/4369 is open.",
+            "invalid_auth": "The Controller Key was rejected by the panel.",
+            "invalid_key": "Controller Key must be exactly 32 hexadecimal characters (16 bytes).",
+            "unknown": "An unexpected error occurred. Check the Home Assistant logs."
+        },
+        "abort": {
+            "already_configured": "This panel is already configured.",
+            "reauth_successful": "Re-authentication was successful."
+        }
+    }
+}
