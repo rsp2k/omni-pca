@@ -5,7 +5,7 @@ description = "Async Python client for HAI/Leviton Omni-Link II home automation 
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ryan Malloy", email = "ryan@supported.systems" }]
-requires-python = ">=3.12"
+requires-python = ">=3.14.2"
 keywords = ["hai", "leviton", "omni", "home-automation", "omni-link", "home-assistant"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -42,6 +42,13 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.13.0",
     "mypy>=1.18.0",
+]
+# Optional group for testing the HA custom_component end-to-end. Pulls in
+# the full Home Assistant test harness; requires Python 3.14.2+. The repo's
+# .python-version pins to 3.14 for development; install with:
+#   uv sync --group ha
+ha = [
+    "pytest-homeassistant-custom-component>=0.13.330",
 ]
 
 [tool.pytest.ini_options]

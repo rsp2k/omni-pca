@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import voluptuous as vol
-from homeassistant.const import CONF_ENTRY_ID
+from homeassistant.const import ATTR_CONFIG_ENTRY_ID as CONF_ENTRY_ID
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 

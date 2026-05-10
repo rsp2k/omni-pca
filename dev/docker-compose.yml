@@ -1,0 +1,46 @@
+# Local dev stack: real Home Assistant talking to a MockPanel running on
+# the host. Lets you click around the UI and grab screenshots without a
+# physical Omni controller.
+#
+#   make dev-up      # start
+#   make dev-logs    # tail HA logs
+#   make dev-down    # stop and clean
+#
+# Once running, open http://localhost:8123 and:
+#   1. Onboard with any name / location.
+#   2. Settings -> Devices & Services -> Add Integration ->
+#      "HAI/Leviton Omni Panel".
+#   3. Use:
+#        host             host.docker.internal
+#        port             14369
+#        controller_key   000102030405060708090a0b0c0d0e0f
+#      (matches scripts/run_mock_panel.py defaults)
+
+services:
+  mock-panel:
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    working_dir: /app
+    volumes:
+      - ..:/app:ro
+    command: >
+      uv run --project /app
+      python /app/dev/run_mock_panel.py
+      --host 0.0.0.0
+      --port 14369
+    ports:
+      - "14369:14369"
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.5
+    container_name: omni-pca-dev-ha
+    depends_on:
+      - mock-panel
+    volumes:
+      - ./ha-config:/config
+      - ../custom_components/omni_pca:/config/custom_components/omni_pca:ro
+    ports:
+      - "8123:8123"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TZ=America/Boise
