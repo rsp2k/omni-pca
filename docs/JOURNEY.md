@@ -639,20 +639,240 @@ enables the Ethernet module, save, reboot. Then the live validation
 becomes a five-minute test. Until then, the mock is the best we have,
 and the mock is a faithful enough emulator that we trust it.
 
-## What's next
+## 2026-05-10 evening — HA rebuild Phase A
 
-The Home Assistant custom_component is being rebuilt on top of the v1.0
-library surface — alarm_control_panel, light, switch, climate, sensor,
-scene, button, event entities, plus services.yaml and diagnostics. That
-work is in progress and will be validated as soon as we can bring the
-panel's network module online.
+The first HA scaffold (a placeholder `binary_sensor` for zones, written
+before the library was complete) needed to come down and get rebuilt on
+the v1.0 surface. The interesting design choice: how should the
+coordinator pull state?
 
-When we do, the moment of truth is one TCP connect to port 4369 and
-one `RequestSystemInformation` exchange. If it comes back with
-`Omni Pro II / 2.12 r1`, the entire stack — file decryption, key
-extraction, key derivation, XOR pre-whitening, AES, the works — was
-right end to end. If it comes back with `ControllerSessionTerminated`,
-we missed something subtle. The mock says we didn't. We'll find out.
+Option A: re-poll everything every N seconds.
+Option B: rely on the panel's unsolicited push messages and only poll
+as a backstop.
+
+We picked B. The Omni panel is genuinely chatty — when a zone trips,
+when an area arms, when AC fails, when a unit toggles, the panel pushes
+a `SystemEvents` packet within a few hundred ms. Our `OmniConnection`
+already decodes those into typed `SystemEvent` objects via an async
+iterator (`client.events()`). The coordinator now runs a long-lived
+background task consuming that iterator and patches the relevant slice
+of state in-place, then calls `async_set_updated_data()` so HA reacts
+immediately. The 30-second poll is a safety net for state we missed.
+
+The piece that took longer than expected was extracting pure functions
+from the entity-class soup so we could unit-test without HA installed
+in the venv. We ended up with `helpers.py`: zone-type → device-class
+mapping, latched-vs-current-condition logic per zone family, name
+prettifier (`FRONT_DOOR` → `Front Door`). 61 unit tests for `helpers.py`
+alone, all running without importing `homeassistant.*`. Sounds excessive
+until you remember that pure-function tests are the only ones that run
+in <100ms; you don't want to wait 15 seconds for HA to boot just to
+verify that zone-type 32 (FIRE) maps to `BinarySensorDeviceClass.SMOKE`.
+
+## 2026-05-10 evening — HA Phase B (the entity build-out)
+
+Six platforms in one pass: `alarm_control_panel` (per area, with code
+validation), `light` (per unit, dimmable), `switch` (per zone for
+bypass control), `climate` (per thermostat, full HVAC modes),
+`sensor` (analog zones + thermostat readings + panel telemetry),
+`button` (per panel macro), `event` (one per panel relaying typed
+push events as HA event_types).
+
+The mapping work was repetitive but mostly mechanical. The interesting
+bits:
+
+- The Omni unit "state" byte is overloaded: 0=off, 1=on (relay),
+  100..200=brightness percent (state - 100), plus weird ranges for
+  scene levels (2..13) and ramping codes (17..25). Encoded as a pair
+  of pure helpers (`omni_state_to_ha_brightness` /
+  `ha_brightness_to_omni_percent`) so the conversion is unit-tested.
+- Omni's `SecurityMode` enum has *both* steady-state values (Off=0,
+  Day=1, Away=3, …) *and* arming-in-progress values (ArmingDay=9,
+  ArmingAway=11, …). The HA `AlarmControlPanelState` mapping needs
+  to bucket the 9..14 range into HA's `arming` state regardless of
+  destination. Plus alarm_active overrides everything to `triggered`,
+  and entry-timer running means `pending`, exit-timer means `arming`.
+  All of this lives in one pure `security_mode_to_alarm_state()`
+  function so it's unit-testable end to end.
+- The HA `event` platform is newer than I'd realised. It exposes
+  push events as a single entity per integration with `event_types`
+  and `event_data`. Automations key on `platform: event` filtering
+  by `event_type`. We surface 12 event-type strings:
+  `zone_state_changed`, `unit_state_changed`, `arming_changed`,
+  `alarm_activated`, `alarm_cleared`, `ac_lost`, `ac_restored`,
+  `battery_low`, `battery_restored`, `user_macro_button`,
+  `phone_line_dead`, `phone_line_restored`, plus an `unknown`
+  catch-all for the 14 less common SystemEvent subclasses.
+
+Skipped the `scene` platform entirely. Omni "scenes" are actually
+just user-named button macros — the underlying call is the same
+`execute_button` that the `button` platform already exposes. Adding
+a parallel scene wrapper would just double-count entities. Documented
+the choice in the integration README.
+
+## 2026-05-10 evening — HA Phase C (services + diagnostics)
+
+Seven services, all routed through a `services.py` module that's
+idempotently registered on first config-entry setup and unloaded on
+the last config-entry teardown:
+
+```
+omni_pca.bypass_zone
+omni_pca.restore_zone
+omni_pca.execute_program
+omni_pca.show_message
+omni_pca.clear_message
+omni_pca.acknowledge_alerts
+omni_pca.send_command   (raw escape hatch)
+```
+
+Each takes an `entry_id` field with HA's `config_entry` selector so
+the UI gives users a panel picker. `services.yaml` declares the
+schema; `services.py` enforces it via `voluptuous`.
+
+Diagnostics endpoint dumps a redacted snapshot for bug reports:
+`controller_key` redacted via `async_redact_data`; zone/unit/area
+names hashed with sha256 so structure is visible without leaking
+PII; counts per object type; last event class; last update success
+timestamp. Useful one day, useless until then, but it's three lines
+and HA users expect it.
+
+## 2026-05-10 evening — "wait, did we mock the panel enough?"
+
+The thinking-out-loud moment that caught a real bug. The HA test
+harness was about to be set up; before doing that, the question was:
+does the mock actually answer every opcode the HA coordinator calls?
+
+Mapped HA-side calls to mock-side handlers. Most matched. But the
+HA coordinator walks `RequestProperties` for object types Thermostat
+(6) and Button (3), and the mock's `_reply_properties` only knew
+about Zone/Unit/Area. Both would have returned `Nak`, the coordinator
+would have moved on, and HA would have discovered zero thermostats
+and zero buttons no matter how `MockState` was seeded.
+
+Added the two handlers (each ~30 lines: build the per-object
+Properties body matching the wire format documented in
+`models.ThermostatProperties.parse` / `models.ButtonProperties.parse`),
+plus two e2e tests that drive the walk with `OmniClient` and assert
+the parses come out clean. Caught it before HA ever touched the mock.
+
+This is the kind of bug that *would* have shown up the first time
+you tried the integration: zero climate entities, zero button
+entities, no error message because the panel just said "no, I have
+no thermostats here". You'd spend an hour staring at it. Mock-the-
+whole-protocol pays for itself the first time it catches one of
+these.
+
+## 2026-05-10 evening — HA test harness, the rough patches
+
+`pytest-homeassistant-custom-component` is the standard HA dev test
+harness. It pins to a specific HA version (we got `2026.5.1` paired
+with HA `2026.5.x`) and provides fixtures to spin up HA in-process
+per test. Sounds simple. Three rough patches:
+
+1. **`requires-python` conflict.** Our library targets `>=3.12`. HA
+   `2026.5+` requires `>=3.14.2`. uv resolves dependency groups
+   against the project's `requires-python` and refused to install
+   the test harness because it couldn't find a Python version
+   satisfying both. Bumped the project to `>=3.14.2` — fine for HA
+   users (HA already needs 3.14), library users on older Python
+   pin to a previous omni-pca version.
+
+2. **`pytest_socket` blocks our e2e tests.** The HA harness installs
+   `pytest_socket` globally to keep HA unit tests hermetic. That
+   broke our existing 17 e2e tests that legitimately need to talk
+   to a localhost MockPanel over a real TCP socket. Fix: a top-
+   level `tests/conftest.py` autouse fixture requesting the
+   harness's `socket_enabled` fixture, which re-enables sockets by
+   default. HA-side tests can opt back into the strict policy if
+   they want.
+
+3. **`CONF_ENTRY_ID` doesn't exist in HA.** Our `services.py` was
+   importing `CONF_ENTRY_ID` from `homeassistant.const`. The harness
+   import-test caught it: HA exports the constant as
+   `ATTR_CONFIG_ENTRY_ID`, not `CONF_ENTRY_ID`. Without the harness,
+   this would have crashed on first install in a real HA. Worth the
+   harness already.
+
+Then teardown started hanging. Each test passed (5-15 seconds for HA
+boot + entity discovery + assertions) but the harness's
+`verify_cleanup` timed out waiting for the coordinator's background
+event-listener task to finish. The coordinator's `async_shutdown()`
+cancels it cleanly — but the harness was tearing the test down without
+calling unload first. Fix: convert the `configured_panel` fixture into
+a generator and call `hass.config_entries.async_unload()` in the
+teardown branch. With that, all 12 HA-side tests run in 0.74 seconds
+total (each one boots HA, runs config flow, asserts, unloads).
+
+Final score: 351 tests pass, 1 skipped (the gitignored `.pca`
+fixture), ruff clean across `src/ tests/ custom_components/`.
+
+## 2026-05-10 late evening — docker dev stack
+
+Wanted a one-command setup so the integration could be browsed
+manually and screenshotted for the README. `docker-compose.yml` with
+two services: real HA `2026.5` from upstream + a sidecar running
+the mock panel.
+
+The interesting wrinkle: the mock panel container needs to import
+`omni_pca`. Mounting the project read-only and running `uv` inside
+the container failed because uv tried to recreate the host's
+`.venv` and the mount was read-only. Fix: mount only `src/` and
+`run_mock_panel.py`, set `PYTHONPATH=/tmp/mock/src`, install just
+`cryptography` via `uv pip install --system`, run the script
+directly. No package install, no venv, just a Python interpreter
+with the right import path.
+
+## 2026-05-10 late evening — automated HA onboarding + screenshots
+
+`dev/screenshot.py` does the entire flow:
+
+1. POST `/api/onboarding/users` to create the demo user (returns
+   `auth_code`)
+2. POST `/auth/token` with `grant_type=authorization_code` to get
+   the access token (HA doesn't support password grant)
+3. On subsequent runs: log in via `/auth/login_flow` (cleaner than
+   re-using a saved token; the token expires in 30 minutes anyway)
+4. POST `/api/config/config_entries/flow` to start the omni_pca
+   config flow, then post the user-input dict to complete it
+5. Cache the panel's device_id by calling HA's template endpoint
+   (`{{ device_id('sensor.omni_pro_ii_panel_model') }}`) — which is
+   a delightfully clean way to ask HA "what's the device id for this
+   entity?"
+6. Launch headless chromium via the `playwright` Python package,
+   inject `localStorage.hassTokens` so it skips the login screen,
+   navigate to six deep-linked pages and screenshot each
+
+The whole script is ~250 lines and produces six PNGs. The
+`04-panel-device.png` is the headline shot: HA's device page for
+"Omni Pro II / by HAI / Leviton / Firmware: 2.12r1" with all the
+Controls (lights, buttons, areas, thermostats), Activity panel,
+Diagnostics download. Every entity from the mock visible in real HA
+UI in the right shape.
+
+A nice side-effect: HA's onboarding wizard has a "We found compatible
+devices!" step that scans the network for known integrations. Our
+manifest got picked up — "HAI/Leviton Omni Panel" appeared in that
+list during onboarding even though we hadn't done anything explicit
+to register it for discovery. The integration name and `iot_class`
+in `manifest.json` was enough.
+
+## What's left for future sessions
+
+The panel's network module is still off. When it comes back online,
+the moment of truth is one TCP connect to `192.168.1.6:4369` (or
+wherever it lives now) and one `RequestSystemInformation`. If the
+reply is `Omni Pro II / 2.12 r1` the entire stack — file decryption,
+key extraction, key derivation, XOR pre-whitening, AES, framing,
+sequencing — was right end to end. The mock says yes. We'll find out.
+
+Other backlog items:
+- `Programs` discovery (no `RequestProperties` opcode for Programs;
+  current implementation returns an empty dict — needs a real
+  protocol path or a separate `RequestProgramData` style call)
+- HACS submission once we've validated against the live panel
+- Maybe publish `omni-pca` to PyPI so the HA `manifest.json`
+  requirements line works without a wheel install
 
 ---
 
@@ -693,3 +913,39 @@ satisfies `Count >= Max` for the affected blocks, so the bug never
 fires. But it would, on a model that doesn't, and PC Access would
 silently mis-parse its own config file. The kind of bug that lives
 in shipping code for a decade because nobody runs the unhappy path.
+
+**Pure functions are the cheapest thing in test suites.** The HA
+custom_component grew six entity platforms before it had any HA
+test harness installed. Every translation between Omni's wire
+encoding and HA's UI encoding lives in `helpers.py` as a pure
+function with no HA imports. 61 unit tests for those alone, all
+running in <100ms. When the harness arrived, the only thing left
+to test was the wiring itself — and the wiring tests run in 0.74
+seconds for the entire 12-test HA-side suite because the pure
+parts already had coverage.
+
+**Mocking the entire protocol counterpart, not just the surface,
+catches whole categories of bugs.** When the mock and the client
+were both being grown, a "did we mock enough?" check caught two
+missing `RequestProperties` handlers (Thermostat and Button). HA
+would have discovered zero of either type silently. With the
+real-world panel offline, mock-the-protocol is the only way to
+trust the stack — but even with the panel available, it's the
+only way to trust changes without rebooting hardware between every
+edit.
+
+**`pytest_socket` and "real network in tests" can coexist.** HA's
+test harness disables sockets globally to keep core unit tests
+hermetic. Our integration tests need real TCP to talk to the in-
+process MockPanel. The fix is one autouse fixture that requests
+the harness's `socket_enabled` fixture; takes ten seconds, lets
+both worlds work without modification.
+
+**The "build the integration without a real device" loop is
+unreasonably effective.** With the docker dev stack, the full
+flow is `make dev-up`, click through HA onboarding (or run
+`screenshot.py` to do it via REST), see your entities. Make a
+code change, `docker compose restart homeassistant`, refresh the
+browser, see the change. Repeat. The panel itself becomes optional
+for ~95% of the development. The other 5% is the live-validation
+lap when the panel comes back online.
