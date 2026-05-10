@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+.uv-cache/
+build/
+dist/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+._*
+
+# Sensitive — never commit panel-specific data
+**/Our*.pca*
+**/PCA01.CFG*
+**/Serial Number*
+**/Serial_Number*
+*.plain
+*.decrypted
+*.plaintext
+**/secrets.yaml
+**/.env
+**/.env.local
+controller_key*
+panel_key*
+
+# Wine artifacts (if used for testing)
+.wine-pca/

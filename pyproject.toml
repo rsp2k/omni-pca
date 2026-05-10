@@ -1,0 +1,78 @@
+[project]
+name = "omni-pca"
+version = "2026.5.10"
+description = "Async Python client for HAI/Leviton Omni-Link II home automation panels (Omni Pro II, Omni IIe, Omni LTe, Lumina)."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ryan Malloy", email = "ryan@supported.systems" }]
+requires-python = ">=3.12"
+keywords = ["hai", "leviton", "omni", "home-automation", "omni-link", "home-assistant"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+]
+dependencies = [
+    "cryptography>=44.0.0",
+]
+
+[project.optional-dependencies]
+cli = ["rich>=13.9.0", "typer>=0.15.0"]
+
+[project.scripts]
+omni-pca = "omni_pca.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/rsp2k/omni-pca"
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.13.0",
+    "mypy>=1.18.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "slow: tests that take more than ~1s",
+    "live: tests that require a real panel (skipped by default)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",
+    "I", "N", "UP", "B", "A", "C4", "PT", "SIM", "RUF",
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["N802", "N803", "PT011"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_reexport = true
