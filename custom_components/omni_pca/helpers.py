@@ -149,3 +149,264 @@ def prettify_name(name: str) -> str:
     detect "no name configured on this index".
     """
     return name.replace("_", " ").strip().title()
+
+
+# --------------------------------------------------------------------------
+# Alarm panel state translation
+# --------------------------------------------------------------------------
+
+# String values matching HA's AlarmControlPanelState enum so this module
+# stays importable without Home Assistant in the venv.
+ALARM_STATE_DISARMED: Final = "disarmed"
+ALARM_STATE_ARMED_HOME: Final = "armed_home"
+ALARM_STATE_ARMED_AWAY: Final = "armed_away"
+ALARM_STATE_ARMED_NIGHT: Final = "armed_night"
+ALARM_STATE_ARMED_VACATION: Final = "armed_vacation"
+ALARM_STATE_ARMED_CUSTOM_BYPASS: Final = "armed_custom_bypass"
+ALARM_STATE_ARMING: Final = "arming"
+ALARM_STATE_PENDING: Final = "pending"
+ALARM_STATE_TRIGGERED: Final = "triggered"
+
+
+# Maps SecurityMode (steady-state values) to HA alarm states. Arming-in-
+# progress modes (9..14) get mapped via _ARMING_MODE_TO_FINAL — an arming
+# area is always reported as ARMING regardless of the destination mode.
+_SECURITY_MODE_TO_ALARM_STATE: dict[int, str] = {
+    0: ALARM_STATE_DISARMED,
+    1: ALARM_STATE_ARMED_HOME,        # DAY
+    2: ALARM_STATE_ARMED_NIGHT,       # NIGHT
+    3: ALARM_STATE_ARMED_AWAY,        # AWAY
+    4: ALARM_STATE_ARMED_VACATION,    # VACATION
+    5: ALARM_STATE_ARMED_CUSTOM_BYPASS,  # DAY_INSTANT
+    6: ALARM_STATE_ARMED_NIGHT,       # NIGHT_DELAYED
+}
+
+_ARMING_MODES: frozenset[int] = frozenset({9, 10, 11, 12, 13, 14})
+
+
+def security_mode_to_alarm_state(
+    mode: int,
+    alarm_active: bool = False,
+    entry_timer: int = 0,
+    exit_timer: int = 0,
+) -> str:
+    """Map an Omni SecurityMode to a HA alarm_control_panel state string.
+
+    Priority order:
+      1. ``alarm_active`` → triggered
+      2. ``entry_timer > 0`` → pending
+      3. arming-in-progress modes or ``exit_timer > 0`` → arming
+      4. steady-state mapping
+    """
+    if alarm_active:
+        return ALARM_STATE_TRIGGERED
+    if entry_timer > 0:
+        return ALARM_STATE_PENDING
+    if mode in _ARMING_MODES or exit_timer > 0:
+        return ALARM_STATE_ARMING
+    return _SECURITY_MODE_TO_ALARM_STATE.get(mode, ALARM_STATE_DISARMED)
+
+
+# Inverse for the four standard arm services HA exposes. Returned ints are
+# the SecurityMode values to send via execute_security_command.
+ARM_SERVICE_TO_SECURITY_MODE: dict[str, int] = {
+    "arm_home": 1,           # DAY
+    "arm_away": 3,           # AWAY
+    "arm_night": 2,          # NIGHT
+    "arm_vacation": 4,       # VACATION
+    "arm_custom_bypass": 5,  # DAY_INSTANT
+    "disarm": 0,             # OFF
+}
+
+
+# --------------------------------------------------------------------------
+# Light brightness conversion (Omni 0..100 ↔ HA 0..255)
+# --------------------------------------------------------------------------
+
+
+def omni_state_to_ha_brightness(state: int) -> int | None:
+    """Decode a UnitStatus.state byte into HA brightness (1..255) or None.
+
+    Returns None when the unit is off (state == 0). For state == 1 (plain
+    "on", non-dimmable) returns 255. For state in 100..200 returns
+    ``round((state - 100) * 255 / 100)`` clamped to 1..255.
+    """
+    if state == 0:
+        return None
+    if state == 1:
+        return 255
+    if 100 <= state <= 200:
+        percent = state - 100
+        return max(1, min(255, round(percent * 255 / 100)))
+    # Scene levels (2..13) and ramping codes (17..25): treat as on, full.
+    return 255
+
+
+def ha_brightness_to_omni_percent(brightness: int) -> int:
+    """Convert HA's 1..255 brightness to Omni's 0..100 percent.
+
+    Brightness 0 is invalid here (use turn_off); 1 maps to 1%, 255 to 100%.
+    """
+    if brightness <= 0:
+        return 0
+    if brightness >= 255:
+        return 100
+    return max(1, min(100, round(brightness * 100 / 255)))
+
+
+# --------------------------------------------------------------------------
+# HVAC mode translation
+# --------------------------------------------------------------------------
+
+HVAC_MODE_OFF: Final = "off"
+HVAC_MODE_HEAT: Final = "heat"
+HVAC_MODE_COOL: Final = "cool"
+HVAC_MODE_HEAT_COOL: Final = "heat_cool"
+HVAC_MODE_AUX_HEAT: Final = "heat"  # HA collapses emergency-heat into heat + preset
+
+_OMNI_HVAC_TO_HA: dict[int, str] = {
+    0: HVAC_MODE_OFF,
+    1: HVAC_MODE_HEAT,
+    2: HVAC_MODE_COOL,
+    3: HVAC_MODE_HEAT_COOL,
+    4: HVAC_MODE_HEAT,    # EMERGENCY_HEAT — HA treats as heat + a preset
+}
+
+_HA_HVAC_TO_OMNI: dict[str, int] = {
+    HVAC_MODE_OFF: 0,
+    HVAC_MODE_HEAT: 1,
+    HVAC_MODE_COOL: 2,
+    HVAC_MODE_HEAT_COOL: 3,
+}
+
+
+def omni_hvac_to_ha(mode: int) -> str:
+    return _OMNI_HVAC_TO_HA.get(mode, HVAC_MODE_OFF)
+
+
+def ha_hvac_to_omni(mode: str) -> int:
+    return _HA_HVAC_TO_OMNI.get(mode, 0)
+
+
+_OMNI_FAN_TO_HA: dict[int, str] = {0: "auto", 1: "on", 2: "diffuse"}
+_HA_FAN_TO_OMNI: dict[str, int] = {"auto": 0, "on": 1, "diffuse": 2, "cycle": 2}
+
+
+def omni_fan_to_ha(mode: int) -> str:
+    return _OMNI_FAN_TO_HA.get(mode, "auto")
+
+
+def ha_fan_to_omni(mode: str) -> int:
+    return _HA_FAN_TO_OMNI.get(mode, 0)
+
+
+_OMNI_HOLD_TO_HA: dict[int, str] = {0: "none", 1: "hold", 2: "vacation", 0xFF: "hold"}
+_HA_HOLD_TO_OMNI: dict[str, int] = {"none": 0, "hold": 1, "vacation": 2}
+
+
+def omni_hold_to_ha(mode: int) -> str:
+    return _OMNI_HOLD_TO_HA.get(mode, "none")
+
+
+def ha_hold_to_omni(mode: str) -> int:
+    return _HA_HOLD_TO_OMNI.get(mode, 0)
+
+
+# --------------------------------------------------------------------------
+# Temperature: HA °F → Omni raw byte
+# --------------------------------------------------------------------------
+#
+# Omni encodes temperature linearly. Per clsText.cs (DecodeTempRaw):
+#     °F = round(raw * 9 / 10) - 40
+#     °C = raw / 2 - 40
+# Inverse:
+#     raw = round((°F + 40) * 10 / 9)
+
+
+def fahrenheit_to_omni_raw(f: float) -> int:
+    """Inverse of omni_temp_to_fahrenheit. Clamps to the valid 0..255 byte."""
+    raw = round((f + 40) * 10 / 9)
+    return max(0, min(255, raw))
+
+
+def celsius_to_omni_raw(c: float) -> int:
+    """Inverse of omni_temp_to_celsius. Clamps to the valid 0..255 byte."""
+    raw = round((c + 40) * 2)
+    return max(0, min(255, raw))
+
+
+# --------------------------------------------------------------------------
+# Analog zone → sensor device class
+# --------------------------------------------------------------------------
+
+SENSOR_DEVICE_CLASS_TEMPERATURE: Final = "temperature"
+SENSOR_DEVICE_CLASS_HUMIDITY: Final = "humidity"
+SENSOR_DEVICE_CLASS_POWER: Final = "power"
+
+_ANALOG_ZONE_TYPE_TO_DEVICE_CLASS: dict[int, str] = {
+    80: SENSOR_DEVICE_CLASS_POWER,        # ENERGY_SAVER
+    81: SENSOR_DEVICE_CLASS_TEMPERATURE,  # OUTDOOR_TEMP
+    82: SENSOR_DEVICE_CLASS_TEMPERATURE,  # TEMPERATURE
+    83: SENSOR_DEVICE_CLASS_TEMPERATURE,  # TEMP_ALARM
+    84: SENSOR_DEVICE_CLASS_HUMIDITY,     # HUMIDITY
+}
+
+
+def analog_zone_device_class(zone_type: int) -> str | None:
+    """Return the HA SensorDeviceClass string for an analog zone, or None."""
+    return _ANALOG_ZONE_TYPE_TO_DEVICE_CLASS.get(zone_type)
+
+
+# --------------------------------------------------------------------------
+# Event surfacing
+# --------------------------------------------------------------------------
+
+# Snake_case event-type strings exposed by the EventEntity.
+EVENT_TYPE_ZONE_STATE_CHANGED: Final = "zone_state_changed"
+EVENT_TYPE_UNIT_STATE_CHANGED: Final = "unit_state_changed"
+EVENT_TYPE_ARMING_CHANGED: Final = "arming_changed"
+EVENT_TYPE_ALARM_ACTIVATED: Final = "alarm_activated"
+EVENT_TYPE_ALARM_CLEARED: Final = "alarm_cleared"
+EVENT_TYPE_AC_LOST: Final = "ac_lost"
+EVENT_TYPE_AC_RESTORED: Final = "ac_restored"
+EVENT_TYPE_BATTERY_LOW: Final = "battery_low"
+EVENT_TYPE_BATTERY_RESTORED: Final = "battery_restored"
+EVENT_TYPE_USER_MACRO_BUTTON: Final = "user_macro_button"
+EVENT_TYPE_PHONE_LINE_DEAD: Final = "phone_line_dead"
+EVENT_TYPE_PHONE_LINE_RESTORED: Final = "phone_line_restored"
+EVENT_TYPE_UNKNOWN: Final = "unknown"
+
+EVENT_TYPES: tuple[str, ...] = (
+    EVENT_TYPE_ZONE_STATE_CHANGED,
+    EVENT_TYPE_UNIT_STATE_CHANGED,
+    EVENT_TYPE_ARMING_CHANGED,
+    EVENT_TYPE_ALARM_ACTIVATED,
+    EVENT_TYPE_ALARM_CLEARED,
+    EVENT_TYPE_AC_LOST,
+    EVENT_TYPE_AC_RESTORED,
+    EVENT_TYPE_BATTERY_LOW,
+    EVENT_TYPE_BATTERY_RESTORED,
+    EVENT_TYPE_USER_MACRO_BUTTON,
+    EVENT_TYPE_PHONE_LINE_DEAD,
+    EVENT_TYPE_PHONE_LINE_RESTORED,
+    EVENT_TYPE_UNKNOWN,
+)
+
+
+def event_type_for(class_name: str) -> str:
+    """Map a SystemEvent subclass name to its snake_case event type."""
+    mapping = {
+        "ZoneStateChanged": EVENT_TYPE_ZONE_STATE_CHANGED,
+        "UnitStateChanged": EVENT_TYPE_UNIT_STATE_CHANGED,
+        "ArmingChanged": EVENT_TYPE_ARMING_CHANGED,
+        "AlarmActivated": EVENT_TYPE_ALARM_ACTIVATED,
+        "AlarmCleared": EVENT_TYPE_ALARM_CLEARED,
+        "AcLost": EVENT_TYPE_AC_LOST,
+        "AcRestored": EVENT_TYPE_AC_RESTORED,
+        "BatteryLow": EVENT_TYPE_BATTERY_LOW,
+        "BatteryRestored": EVENT_TYPE_BATTERY_RESTORED,
+        "UserMacroButton": EVENT_TYPE_USER_MACRO_BUTTON,
+        "PhoneLineDead": EVENT_TYPE_PHONE_LINE_DEAD,
+        "PhoneLineRestored": EVENT_TYPE_PHONE_LINE_RESTORED,
+    }
+    return mapping.get(class_name, EVENT_TYPE_UNKNOWN)

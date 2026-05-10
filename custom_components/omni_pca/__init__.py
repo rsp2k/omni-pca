@@ -1,8 +1,10 @@
 """HAI/Leviton Omni Panel integration for Home Assistant.
 
-Phase A entry point. Phase B will append additional platforms (light,
-switch, climate, alarm_control_panel, sensor, scene, button, event) to
-:data:`PLATFORMS`; nothing else here changes.
+Forwards every config entry to the full set of platforms wrapping the
+omni-pca library: alarm_control_panel (areas), binary_sensor (zones +
+system flags), button (panel button macros), climate (thermostats),
+event (typed push events), light (units), sensor (analog zones,
+thermostat readings, panel telemetry), switch (zone bypass).
 """
 
 from __future__ import annotations
@@ -19,7 +21,16 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
 
-PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.ALARM_CONTROL_PANEL,
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+    Platform.CLIMATE,
+    Platform.EVENT,
+    Platform.LIGHT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
