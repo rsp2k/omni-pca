@@ -49,6 +49,8 @@ Get the ControllerKey from your `.pca` file using the included parser:
 uvx --from omni-pca omni-pca decode-pca path/to/Your.pca --field controller_key
 ```
 
+The integration creates one HA device per panel plus typed entities for every named object on the controller: `alarm_control_panel` for areas, `light` for units, `binary_sensor`/`switch` for zones (state + bypass), `climate` for thermostats, `sensor` for analog zones and panel telemetry, `button` for panel macros, and `event` for the typed push-notification stream. See [`custom_components/omni_pca/README.md`](custom_components/omni_pca/README.md) for the entity table and service list.
+
 ## Without a panel — mock controller
 
 For testing, the library ships a minimal Omni controller emulator:

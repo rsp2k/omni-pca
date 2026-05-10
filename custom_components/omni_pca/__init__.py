@@ -16,6 +16,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import CONF_CONTROLLER_KEY, DOMAIN, LOGGER
 from .coordinator import OmniDataUpdateCoordinator
+from .services import async_setup_services, async_unload_services
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -67,6 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await async_setup_services(hass)
     return True
 
 
@@ -81,4 +83,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unloaded:
         coordinator: OmniDataUpdateCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.async_shutdown()
+        await async_unload_services(hass)
     return unloaded

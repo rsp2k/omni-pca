@@ -1,0 +1,159 @@
+bypass_zone:
+  name: Bypass zone
+  description: Bypass a single zone (panel ignores it until restored).
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+    zone_index:
+      name: Zone index
+      description: 1-based zone number on the panel.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 176
+          mode: box
+
+restore_zone:
+  name: Restore zone
+  description: Restore a previously-bypassed zone.
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+    zone_index:
+      name: Zone index
+      description: 1-based zone number on the panel.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 176
+          mode: box
+
+execute_program:
+  name: Execute program
+  description: Run a stored program on the panel by its 1-based index.
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+    program_index:
+      name: Program index
+      description: 1-based program number on the panel.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 1024
+          mode: box
+
+show_message:
+  name: Show panel message
+  description: Display a stored message on panel consoles by message index.
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+    message_index:
+      name: Message index
+      description: 1-based stored message number.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 128
+          mode: box
+
+clear_message:
+  name: Clear panel message
+  description: Clear the currently-displayed message on panel consoles.
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+    message_index:
+      name: Message index
+      description: 1-based stored message number to clear.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 128
+          mode: box
+
+acknowledge_alerts:
+  name: Acknowledge alerts
+  description: Acknowledge all outstanding alerts and trouble conditions on the panel.
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+
+send_command:
+  name: Send raw command
+  description: >
+    Send a raw Omni Command (opcode 20). Power-user escape hatch — see
+    omni_pca.commands.Command for the full enumeration.
+  fields:
+    entry_id:
+      name: Panel
+      description: Config entry ID of the Omni panel.
+      required: true
+      selector:
+        config_entry:
+          integration: omni_pca
+    command:
+      name: Command code
+      description: Numeric Command enum value (0-255).
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box
+    parameter1:
+      name: Parameter 1
+      description: First command parameter (single byte 0-255).
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 255
+          mode: box
+    parameter2:
+      name: Parameter 2
+      description: Second command parameter (BE uint16, 0-65535).
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
