@@ -19,14 +19,16 @@
 services:
   mock-panel:
     image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
-    working_dir: /app
+    working_dir: /tmp/mock
     volumes:
-      - ..:/app:ro
-    command: >
-      uv run --project /app
-      python /app/dev/run_mock_panel.py
-      --host 0.0.0.0
-      --port 14369
+      - ../src:/tmp/mock/src:ro
+      - ./run_mock_panel.py:/tmp/mock/run_mock_panel.py:ro
+    environment:
+      PYTHONPATH: /tmp/mock/src
+    command:
+      - sh
+      - -c
+      - "uv pip install --system --quiet cryptography && python /tmp/mock/run_mock_panel.py --host 0.0.0.0 --port 14369"
     ports:
       - "14369:14369"
 

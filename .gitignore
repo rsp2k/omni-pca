@@ -40,3 +40,4 @@ panel_key*
 # Wine artifacts (if used for testing)
 .wine-pca/
 ha-config/
+dist/
