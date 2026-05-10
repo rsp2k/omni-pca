@@ -59,6 +59,7 @@ _log = logging.getLogger(__name__)
 # enuObjectType (clsOmniLink2.cs / enuObjectType.cs)
 _OBJ_ZONE = 1
 _OBJ_UNIT = 2
+_OBJ_BUTTON = 3
 _OBJ_AREA = 5
 _OBJ_THERMOSTAT = 6
 
@@ -66,6 +67,8 @@ _OBJ_THERMOSTAT = 6
 _ZONE_NAME_LEN = 15
 _UNIT_NAME_LEN = 12
 _AREA_NAME_LEN = 12
+_BUTTON_NAME_LEN = 12
+_THERMOSTAT_NAME_LEN = 12
 _PHONE_LEN = 24
 
 # Per-object-type record sizes for the basic Status (opcode 35) reply.
@@ -157,6 +160,13 @@ class MockZoneState:
 
 
 @dataclass
+class MockButtonState:
+    """One programmable button macro (no live state — buttons just fire programs)."""
+
+    name: str = ""
+
+
+@dataclass
 class MockThermostatState:
     """One programmable thermostat. Defaults are sane Omni Pro II values."""
 
@@ -197,6 +207,7 @@ class MockState:
     units: dict[int, MockUnitState] = field(default_factory=dict)
     areas: dict[int, MockAreaState] = field(default_factory=dict)
     thermostats: dict[int, MockThermostatState] = field(default_factory=dict)
+    buttons: dict[int, MockButtonState] = field(default_factory=dict)
 
     # User-code table for ExecuteSecurityCommand validation.
     # Mapping is ``{code_index: 4-digit pin}``; the panel returns the
@@ -230,6 +241,7 @@ class MockState:
         self.units = _promote_dict(self.units, MockUnitState)
         self.areas = _promote_dict(self.areas, MockAreaState)
         self.thermostats = _promote_dict(self.thermostats, MockThermostatState)
+        self.buttons = _promote_dict(self.buttons, MockButtonState)
 
     # ---- name-bytes helpers (kept for back-compat with old callers) -----
 
@@ -244,6 +256,14 @@ class MockState:
     def area_name_bytes(self, idx: int) -> bytes:
         a = self.areas.get(idx)
         return _name_bytes(a.name if a else "", _AREA_NAME_LEN)
+
+    def thermostat_name_bytes(self, idx: int) -> bytes:
+        t = self.thermostats.get(idx)
+        return _name_bytes(t.name if t else "", _THERMOSTAT_NAME_LEN)
+
+    def button_name_bytes(self, idx: int) -> bytes:
+        b = self.buttons.get(idx)
+        return _name_bytes(b.name if b else "", _BUTTON_NAME_LEN)
 
 
 def _promote_dict(
@@ -618,6 +638,10 @@ class MockPanel:
             return self._build_unit_properties(target)
         if obj_type == _OBJ_AREA:
             return self._build_area_properties(target)
+        if obj_type == _OBJ_THERMOSTAT:
+            return self._build_thermostat_properties(target)
+        if obj_type == _OBJ_BUTTON:
+            return self._build_button_properties(target)
         return _build_nak(OmniLink2MessageType.RequestProperties)
 
     def _object_store(self, obj_type: int) -> dict[int, object] | None:
@@ -629,6 +653,8 @@ class MockPanel:
             return self.state.areas  # type: ignore[return-value]
         if obj_type == _OBJ_THERMOSTAT:
             return self.state.thermostats  # type: ignore[return-value]
+        if obj_type == _OBJ_BUTTON:
+            return self.state.buttons  # type: ignore[return-value]
         return None
 
     def _build_zone_properties(self, index: int) -> Message:
@@ -675,6 +701,58 @@ class MockPanel:
             )
             + self.state.unit_name_bytes(index)
             + bytes([0, 1])  # reserved + UnitAreas (default area 1)
+        )
+        return encode_v2(OmniLink2MessageType.Properties, body)
+
+    def _build_thermostat_properties(self, index: int) -> Message:
+        # Properties.Data layout for Thermostat (Data[0]=opcode, body starts
+        # at Data[1]. ``payload`` here strips the opcode; payload[i]==Data[i+1]):
+        #   payload[0]    object type (Thermostat = 6)
+        #   payload[1..2] object number (BE u16)
+        #   payload[3]    communicating flag
+        #   payload[4]    temperature raw
+        #   payload[5]    heat setpoint raw
+        #   payload[6]    cool setpoint raw
+        #   payload[7]    mode
+        #   payload[8]    fan mode
+        #   payload[9]    hold mode
+        #   payload[10]   thermostat type
+        #   payload[11..22] 12-byte name
+        t = self.state.thermostats.get(index)
+        body = (
+            bytes(
+                [
+                    _OBJ_THERMOSTAT,
+                    (index >> 8) & 0xFF,
+                    index & 0xFF,
+                    t.status if t else 0,                    # communicating flag
+                    t.temperature_raw if t else 0,
+                    t.heat_setpoint_raw if t else 0,
+                    t.cool_setpoint_raw if t else 0,
+                    t.system_mode if t else 0,
+                    t.fan_mode if t else 0,
+                    t.hold_mode if t else 0,
+                    1,                                       # thermostat type: AUTO_HEAT_COOL
+                ]
+            )
+            + self.state.thermostat_name_bytes(index)
+        )
+        return encode_v2(OmniLink2MessageType.Properties, body)
+
+    def _build_button_properties(self, index: int) -> Message:
+        # Properties.Data layout for Button:
+        #   payload[0]      object type (Button = 3)
+        #   payload[1..2]   object number (BE u16)
+        #   payload[3..14]  12-byte name (NUL-padded)
+        body = (
+            bytes(
+                [
+                    _OBJ_BUTTON,
+                    (index >> 8) & 0xFF,
+                    index & 0xFF,
+                ]
+            )
+            + self.state.button_name_bytes(index)
         )
         return encode_v2(OmniLink2MessageType.Properties, body)
 

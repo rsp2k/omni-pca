@@ -18,6 +18,7 @@ from omni_pca.connection import HandshakeError
 from omni_pca.events import ArmingChanged, UnitStateChanged
 from omni_pca.mock_panel import (
     MockAreaState,
+    MockButtonState,
     MockPanel,
     MockState,
     MockThermostatState,
@@ -270,6 +271,76 @@ async def test_e2e_unit_command_pushes_unit_state_changed_event() -> None:
         assert isinstance(ev, UnitStateChanged)
         assert ev.unit_index == 1
         assert ev.is_on is True
+
+
+async def test_e2e_thermostat_properties_discovery() -> None:
+    """The HA coordinator walks thermostats via raw RequestProperties; ensure
+    the mock answers and the response parses cleanly into ThermostatProperties.
+    """
+    from omni_pca.models import ObjectType as ObjType
+    from omni_pca.models import ThermostatProperties
+    from omni_pca.opcodes import OmniLink2MessageType
+
+    state = MockState(
+        thermostats={
+            1: MockThermostatState(name="LIVING_ROOM"),
+            3: MockThermostatState(name="MASTER"),
+        }
+    )
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
+    async with (
+        panel.serve() as (host, port),
+        OmniClient(host=host, port=port, controller_key=CONTROLLER_KEY) as cli,
+    ):
+        found: dict[int, str] = {}
+        cursor = 0
+        for _ in range(10):
+            payload = bytes(
+                [int(ObjType.THERMOSTAT), (cursor >> 8) & 0xFF, cursor & 0xFF, 1, 0, 0, 0]
+            )
+            reply = await cli.connection.request(
+                OmniLink2MessageType.RequestProperties, payload
+            )
+            if reply.opcode == int(OmniLink2MessageType.EOD):
+                break
+            t = ThermostatProperties.parse(reply.payload)
+            found[t.index] = t.name
+            cursor = t.index
+    assert found == {1: "LIVING_ROOM", 3: "MASTER"}
+
+
+async def test_e2e_button_properties_discovery() -> None:
+    """Same idea for button discovery (the HA coordinator drives this too)."""
+    from omni_pca.models import ButtonProperties
+    from omni_pca.models import ObjectType as ObjType
+    from omni_pca.opcodes import OmniLink2MessageType
+
+    state = MockState(
+        buttons={
+            1: MockButtonState(name="GOOD_MORNING"),
+            5: MockButtonState(name="MOVIE_MODE"),
+        }
+    )
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
+    async with (
+        panel.serve() as (host, port),
+        OmniClient(host=host, port=port, controller_key=CONTROLLER_KEY) as cli,
+    ):
+        found: dict[int, str] = {}
+        cursor = 0
+        for _ in range(10):
+            payload = bytes(
+                [int(ObjType.BUTTON), (cursor >> 8) & 0xFF, cursor & 0xFF, 1, 0, 0, 0]
+            )
+            reply = await cli.connection.request(
+                OmniLink2MessageType.RequestProperties, payload
+            )
+            if reply.opcode == int(OmniLink2MessageType.EOD):
+                break
+            b = ButtonProperties.parse(reply.payload)
+            found[b.index] = b.name
+            cursor = b.index
+    assert found == {1: "GOOD_MORNING", 5: "MOVIE_MODE"}
 
 
 async def test_e2e_acknowledge_alerts() -> None:
