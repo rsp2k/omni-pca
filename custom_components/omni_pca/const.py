@@ -20,6 +20,15 @@ MANUFACTURER: Final = "HAI / Leviton"
 # panel goes quiet.
 SCAN_INTERVAL: Final = timedelta(seconds=30)
 
+# Background event-listener task name, surfaced to ``asyncio.all_tasks()``
+# for diagnostics.
+EVENT_TASK_NAME: Final = "omni_pca-event-listener"
+
+# Upper bound for the discovery walk. The protocol caps object indices at
+# uint16, but Omni panels never approach that — most installs have <100
+# zones / units / areas, so we stop early when discovery returns EOD.
+MAX_OBJECT_INDEX: Final = 0xFFFF
+
 # Length, in characters, of a hex-encoded 16-byte controller key.
 CONTROLLER_KEY_HEX_LEN: Final = 32
 

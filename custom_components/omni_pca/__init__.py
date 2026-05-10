@@ -1,4 +1,9 @@
-"""HAI/Leviton Omni Panel integration for Home Assistant."""
+"""HAI/Leviton Omni Panel integration for Home Assistant.
+
+Phase A entry point. Phase B will append additional platforms (light,
+switch, climate, alarm_control_panel, sensor, scene, button, event) to
+:data:`PLATFORMS`; nothing else here changes.
+"""
 
 from __future__ import annotations
 
@@ -44,7 +49,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
-        # Re-raise so HA retries with backoff; clean up any half-open client.
+        # Re-raise so HA retries with backoff; clean up any half-open client
+        # *and* the background event task spawned by the first refresh.
         await coordinator.async_shutdown()
         raise
 
@@ -54,7 +60,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
+    """Unload a config entry.
+
+    ``coordinator.async_shutdown()`` cancels the long-lived event-listener
+    task and closes the ``OmniClient`` socket, so HA's reload doesn't
+    leak a background coroutine or a half-open TCP connection.
+    """
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         coordinator: OmniDataUpdateCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
