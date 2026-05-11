@@ -43,6 +43,8 @@ services:
       - "uv pip install --system --quiet cryptography && python /tmp/mock/run_mock_panel.py --host 0.0.0.0 --port 14369"
     ports:
       - "14369:14369"
+    networks:
+      - default
 
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:2026.5
@@ -58,12 +60,31 @@ services:
       # ``omni-pca==2026.5.10`` (which isn't on PyPI yet) and ensures the
       # v1 subpackage is present.
       - ../:/opt/omni-pca-src:ro
+    # Keep 8123 mapped on localhost for direct access during development;
+    # public traffic comes in via caddy-docker-proxy on the `caddy` net.
     ports:
       - "8123:8123"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - TZ=America/Boise
+    networks:
+      - default
+      - caddy
+    labels:
+      caddy: juliet.warehack.ing
+      caddy.reverse_proxy: "{{upstreams 8123}}"
+      # HA uses WebSockets for the frontend (lovelace state updates,
+      # config flow, etc.) so we need the streaming-friendly settings
+      # from CLAUDE.md, otherwise caddy closes the socket every ~15s.
+      caddy.reverse_proxy.flush_interval: "-1"
+      caddy.reverse_proxy.transport: http
+      caddy.reverse_proxy.transport.read_timeout: "0"
+      caddy.reverse_proxy.transport.write_timeout: "0"
+      caddy.reverse_proxy.transport.keepalive: 5m
+      caddy.reverse_proxy.transport.keepalive_idle_conns: "10"
+      caddy.reverse_proxy.stream_timeout: 24h
+      caddy.reverse_proxy.stream_close_delay: 5s
     # HA's image entrypoint is /init (s6-overlay). We pre-install our
     # local library against site-packages so HA's manifest-requirement
     # check finds it, then exec /init normally.
@@ -74,3 +95,7 @@ services:
         set -e
         pip install --quiet --no-deps --upgrade /opt/omni-pca-src
         exec /init
+
+networks:
+  caddy:
+    external: true
