@@ -31,6 +31,16 @@ References:
     clsOL2MsgRequestStatus.cs / clsOL2MsgStatus.cs
     clsOL2MsgRequestExtendedStatus.cs / clsOL2MsgExtendedStatus.cs
     clsOLMsgSystemEvents.cs
+
+Cross-references (HAI OmniPro II Installation Manual):
+    *INSTALLER SETUP* (pca-re/docs/manuals/installation_manual/
+    04_INSTALLER_SETUP/) is the human-side counterpart to the data
+    this mock serves: the panel's response to a RequestProperties /
+    RequestStatus would on real hardware reflect whatever an installer
+    typed into SETUP CONTROL / SETUP ZONES / SETUP AREAS / SETUP
+    TEMPERATURES / SETUP MISC for that object. The mock just makes up
+    plausible bytes; production fixtures should pre-seed the
+    ``MockPanel`` state to match a known SETUP configuration.
 """
 
 from __future__ import annotations

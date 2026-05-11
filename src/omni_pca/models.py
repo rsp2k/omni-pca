@@ -686,7 +686,9 @@ class ZoneStatus:
         bytes[2]     status byte (current+latched+arming, see below)
         bytes[3]     analog loop reading (0-255)
 
-    Status byte bit layout (clsZone.cs:385, clsText.cs:3110):
+    Status byte bit layout (clsZone.cs:385, clsText.cs:3110, and the
+    "View Zone Status" keypad screen in the Owner's Manual *CONTROL*
+    chapter, pca-re/docs/owner_manual/05_CONTROL/):
         bits 0-1 (mask 0x03): current condition
             0=Secure, 1=NotReady, 2=Trouble, 3=Tamper
         bits 2-3 (mask 0x0C): latched alarm status
@@ -781,7 +783,11 @@ class UnitStatus:
         bytes[3..4]  remaining time in seconds (BE u16, 0 = indefinite)
         bytes[5..6]  optional ZigBee instantaneous power (W, BE u16)
 
-    State byte semantics (clsUnit.cs:405-533):
+    State byte semantics (clsUnit.cs:405-533; user-visible meaning in
+    the Owner's Manual *CONTROL → Light/Appliance Control* chapter,
+    pca-re/docs/owner_manual/05_CONTROL/, which documents the keypad
+    "All On" / "All Off" / "Scene" / "Bright/Dim" actions that put a
+    unit into each of these states):
         0           Off
         1           On
         2..13       Scene A..L (state - 63 → 'A'..'L' as ASCII char)

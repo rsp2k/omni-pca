@@ -21,6 +21,18 @@ Per-record byte counts (verified against firmware 2.12 over UDP):
     AuxiliaryStatus   4 bytes per aux    (relay, current, low_sp,
                                           high_sp)
 
+Cross-references (HAI OmniPro II Installation Manual):
+    *INSTALLER SETUP → SETUP ZONES* (pca-re/docs/manuals/
+        installation_manual/04_INSTALLER_SETUP/) — the zone-type and
+        zone-options bits that determine what each ``ZoneStatus.raw_status``
+        byte's high nibble means come from this chapter.
+    *INSTALLER SETUP → SETUP TEMPERATURES* — same chapter, thermostat
+        enable/disable + thermostat type that drives whether
+        ``parse_v1_thermostat_status`` records are populated at all.
+    *APPENDIX C — ZONE AND UNIT MAPPING* (12_…) — what each record's
+        synthesized index *means* on the hardware side (e.g. unit 257+
+        = expansion-enclosure outputs, 393+ = panel flags).
+
 References:
     clsOLMsgZoneStatus.cs        / clsOLMsgRequestZoneStatus.cs
     clsOLMsgUnitStatus.cs        / clsOLMsgRequestUnitStatus.cs
