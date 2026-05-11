@@ -53,6 +53,25 @@ asyncio.run(main())
 
 For the panel walkthrough — connect, list zones, react to push events — see the [tutorial](https://hai-omni-pro-ii.warehack.ing/tutorials/first-script/).
 
+## Two wire dialects — TCP/v2 vs UDP/v1
+
+The Omni network module is configurable at the panel keypad to listen on **TCP, UDP, or both**. Each transport speaks a different wire dialect — `OmniClient` above handles the TCP path (OmniLink2, the modern wire format used by PC Access ≥ 3); panels configured UDP-only fall back to the legacy v1 protocol with typed `RequestZoneStatus` / `RequestUnitStatus` opcodes, no `RequestProperties`, and streaming name downloads. For those, use [`OmniClientV1`](https://hai-omni-pro-ii.warehack.ing/reference/library-api/#v1-udp-omniclientv1) from the `omni_pca.v1` subpackage:
+
+```python
+from omni_pca.v1 import OmniClientV1
+
+async with OmniClientV1(
+    host="192.168.1.9",
+    controller_key=bytes.fromhex("..."),
+) as panel:
+    info = await panel.get_system_information()      # same dataclass as v2
+    names = await panel.list_all_names()             # streaming UploadNames
+    zones = await panel.get_zone_status(1, 16)       # typed status by range
+    await panel.execute_security_command(area=1, mode=SecurityMode.AWAY, code=1234)
+```
+
+The HA integration picks the right client automatically based on the **Transport** dropdown in the config flow (TCP vs UDP). See [zone & unit numbering](https://hai-omni-pro-ii.warehack.ing/explanation/zone-unit-numbering/) for why v1 panels need the long-form `RequestUnitStatus` for unit indices > 255.
+
 ## Quick start (Home Assistant)
 
 ```bash
