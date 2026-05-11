@@ -3,7 +3,7 @@
 Wire layout (non-addressable):
     ``[start_char][length][...data...][crc_lo][crc_hi]``
 
-For v1 addressable messages (StartChar=0x5A) a single SerialAddress byte
+For v1 addressable messages (StartChar=0x41) a single SerialAddress byte
 is interleaved between start_char and length.
 
 CRC is CRC-16/MODBUS (poly 0xA001, init 0, reflected) computed over the
@@ -13,6 +13,8 @@ on the wire (CRC1 = low byte, CRC2 = high byte).
 References:
     clsOmniLinkMessage.cs (lines 9, 164-186, 273-289) — frame + CRC
     clsOmniLink2Message.cs (lines 17-23) — v2 StartChar = 0x21
+    enuOmniLinkMessageFormat.cs — Addressable=0x41, NonAddressable=0x5A,
+                                   OmniLink2=0x21
     clsOL2MsgLogin.cs / clsOLMsgLogin.cs — example payloads
 """
 
@@ -23,8 +25,8 @@ from dataclasses import dataclass, field
 from .opcodes import OmniLink2MessageType, OmniLinkMessageType
 
 START_CHAR_V2 = 0x21
-START_CHAR_V1_UNADDRESSED = 0x41
-START_CHAR_V1_ADDRESSABLE = 0x5A
+START_CHAR_V1_ADDRESSABLE = 0x41
+START_CHAR_V1_UNADDRESSED = 0x5A
 
 _CRC_POLY_REFLECTED = 0xA001
 
