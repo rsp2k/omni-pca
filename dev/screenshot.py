@@ -32,7 +32,17 @@ async def _complete_onboarding(
 ) -> None:
     """POST every remaining onboarding step in turn so HA stops greeting us."""
     r = await client.get("/api/onboarding")
-    pending = [s["step"] for s in r.json() if not s.get("done")]
+    if r.status_code != 200:
+        # Endpoint disappears once onboarding is fully complete — nothing
+        # to do, the user is already past the welcome wizard.
+        print("  onboarding endpoint 404 — already complete")
+        return
+    try:
+        steps = r.json()
+    except Exception:
+        print("  onboarding endpoint returned non-JSON — assuming complete")
+        return
+    pending = [s["step"] for s in steps if not s.get("done")]
     print(f"  pending onboarding: {pending}")
 
     if "core_config" in pending:
@@ -73,7 +83,15 @@ async def _onboard(ha_url: str) -> str:
     """
     async with httpx.AsyncClient(base_url=ha_url, timeout=30.0) as client:
         r = await client.get("/api/onboarding")
-        steps = r.json()
+        # Once onboarding is fully complete the endpoint 404s with a
+        # plain-text body instead of a JSON step list — skip straight to
+        # the subsequent-run login path in that case.
+        steps: list[dict] = []
+        if r.status_code == 200:
+            try:
+                steps = r.json()
+            except Exception:
+                steps = []
         user_step = next((s for s in steps if s["step"] == "user"), None)
 
         if user_step and not user_step.get("done"):
@@ -199,7 +217,8 @@ async def _take_screenshots(ha_url: str, token: str, outdir: Path) -> list[Path]
             viewport={"width": 1440, "height": 900},
             device_scale_factor=2,
         )
-        # Inject auth so we skip the login screen.
+        # Inject auth so we skip the login screen + force HA's dark theme
+        # so screenshots match the docs site's default theme.
         await context.add_init_script(
             f"""window.localStorage.setItem('hassTokens', JSON.stringify({{
                 access_token: '{token}',
@@ -211,6 +230,15 @@ async def _take_screenshots(ha_url: str, token: str, outdir: Path) -> list[Path]
                 refresh_token: 'placeholder',
             }}));
             window.localStorage.setItem('selectedLanguage', '"en"');
+            // Force dark theme — HA reads selectedTheme from localStorage
+            // before the user-settings panel loads. The empty 'theme' object
+            // tells HA "use the default dark theme, not a custom one".
+            window.localStorage.setItem('selectedTheme', JSON.stringify({{
+                theme: 'default',
+                dark: true,
+                primaryColor: null,
+                accentColor: null,
+            }}));
             """
         )
         page = await context.new_page()
