@@ -227,7 +227,35 @@ class OmniConnection:
         if self._closed:
             return
         self._closed = True
+        previous_state = self._state
         self._state = ConnectionState.DISCONNECTED
+
+        # Politely tell the controller we're done — Omni is single-client,
+        # and on UDP it has no other way to know we've gone (TCP gets a
+        # FIN; UDP just sees datagrams stop). Without this, the panel
+        # holds the session slot until its idle timeout and rejects new
+        # connections from us with ControllerCannotStartNewSession.
+        if previous_state in (
+            ConnectionState.NEW_SESSION,
+            ConnectionState.SECURE,
+            ConnectionState.ONLINE,
+        ):
+            try:
+                term_seq = self._claim_seq()
+                term = Packet(
+                    seq=term_seq,
+                    type=PacketType.ClientSessionTerminated,
+                    data=b"",
+                )
+                self._write_packet(term)
+                # Best-effort flush so the byte hits the wire before we
+                # tear down the socket. UDP is fire-and-forget; TCP needs
+                # a tick for the writer to drain.
+                if self._writer is not None:
+                    with contextlib.suppress(Exception):
+                        await self._writer.drain()
+            except Exception as exc:  # noqa: BLE001 - close() must be idempotent
+                _log.debug("close: failed to send ClientSessionTerminated: %s", exc)
 
         # Cancel anyone still waiting for a reply.
         for fut in self._pending.values():
