@@ -518,7 +518,13 @@ class SecurityMode(IntEnum):
 
 
 class HvacMode(IntEnum):
-    """Thermostat system mode (enuThermostatMode.cs)."""
+    """Thermostat system mode (enuThermostatMode.cs).
+
+    Values 0-3 match the keypad's "Thermostat → MODE" menu one-for-one
+    (Owner's Manual *Scene Commands → Thermostat Control* chapter,
+    pca-re/docs/owner_manual/06_Scene_Commands/). ``EMERGENCY_HEAT`` (4)
+    is heat-pump-only and not exposed in the standard keypad menu.
+    """
 
     OFF = 0
     HEAT = 1
@@ -528,7 +534,12 @@ class HvacMode(IntEnum):
 
 
 class FanMode(IntEnum):
-    """Thermostat fan mode (enuThermostatFanMode.cs)."""
+    """Thermostat fan mode (enuThermostatFanMode.cs).
+
+    Values 0-1 match the keypad's "Thermostat → FAN" menu (Owner's
+    Manual *Scene Commands*, 06_Scene_Commands/). ``CYCLE`` (2) is
+    programmable-only and not surfaced at the keypad.
+    """
 
     AUTO = 0
     ON = 1
@@ -538,8 +549,12 @@ class FanMode(IntEnum):
 class HoldMode(IntEnum):
     """Thermostat hold mode (enuThermostatHoldMode.cs).
 
-    Value 255 (``OLD_ON``) is a legacy "Hold" sentinel from older firmware
-    that some panels still emit; treat it as equivalent to ``HOLD``.
+    ``OFF`` / ``HOLD`` are the two states surfaced at the keypad's
+    "Thermostat → HOLD" menu (Owner's Manual *Scene Commands*,
+    06_Scene_Commands/). ``VACATION`` (2) is a programmable mode the
+    panel uses while a Vacation security mode is active. Value 255
+    (``OLD_ON``) is a legacy "Hold" sentinel from older firmware that
+    some panels still emit; treat it as equivalent to ``HOLD``.
     """
 
     OFF = 0

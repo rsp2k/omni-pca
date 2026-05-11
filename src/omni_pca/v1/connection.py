@@ -21,6 +21,14 @@ Reference: clsOmniLinkConnection.cs (UDP path):
     udpHandleRequestSecureSession lines 1461-1487 step 4 → OnlineSecure
     udpSend         lines 1514-1560  outer PacketType = OmniLinkMessage (16)
     EncryptPacket   lines 372-401    same crypto as TCP
+
+Cross-references:
+    *Two non-public quirks* — Owner's-Manual-style writeup of the
+    session-key XOR mix and per-block sequence whitening that this
+    handshake relies on: https://hai-omni-pro-ii.warehack.ing/explanation/quirks/
+    *Zone & unit numbering* — explains why subsequent ``RequestUnitStatus``
+    calls need the long-form (BE u16) payload for unit indices > 255:
+    https://hai-omni-pro-ii.warehack.ing/explanation/zone-unit-numbering/
 """
 
 from __future__ import annotations

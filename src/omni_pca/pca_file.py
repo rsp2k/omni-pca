@@ -16,6 +16,22 @@ References:
     clsPcaCfg.cs — keyPC01 / keyExport constants, PCA01.CFG layout
     clsHAC.cs:7943-8056 — .pca header + body walker, Connection block
     clsCapOMNI_PRO_II.cs — per-model size constants used by the body walker
+
+Cross-references (HAI OmniPro II Installation Manual):
+    *INSTALLER SETUP* (pca-re/docs/manuals/installation_manual/
+    04_INSTALLER_SETUP/) is what populates everything we then read back
+    from a .pca export:
+        SETUP CONTROL   → SetupData block (panel-wide options)
+        SETUP ZONES     → Names section (zone-name entries) + Z*_TYPE
+                          (encoded inside SetupData)
+        SETUP AREAS     → Names section (area-name entries) + per-area
+                          delays and codes in SetupData
+        SETUP MISC      → Programs section (timed scenes, energy savers)
+        SETUP EXPANSION → cap counters that drive how big each names
+                          block is on the wire
+    APPENDIX C — ZONE AND UNIT MAPPING (12_APPENDIX_C_-_ZONE_AND_UNIT_MAPPING/)
+    documents the address-space layout the cap constants in
+    _CAP_OMNI_PRO_II below derive from (176 zones, 511 units, etc.).
 """
 
 from __future__ import annotations
