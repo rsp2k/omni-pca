@@ -20,10 +20,14 @@ from omni_pca.connection import (
 
 from .const import (
     CONF_CONTROLLER_KEY,
+    CONF_TRANSPORT,
     CONTROLLER_KEY_HEX_LEN,
     DEFAULT_PORT,
+    DEFAULT_TRANSPORT,
     DOMAIN,
     LOGGER,
+    TRANSPORT_TCP,
+    TRANSPORT_UDP,
 )
 
 
@@ -60,6 +64,12 @@ _USER_SCHEMA = vol.Schema(
             vol.Coerce(int), vol.Range(min=1, max=65535)
         ),
         vol.Required(CONF_CONTROLLER_KEY): str,
+        # Most modern firmware uses TCP; some installers configure
+        # Network_UDP. PC Access stores the choice as
+        # enuPreferredNetworkProtocol in the .pca config.
+        vol.Required(CONF_TRANSPORT, default=DEFAULT_TRANSPORT): vol.In(
+            [TRANSPORT_TCP, TRANSPORT_UDP]
+        ),
     }
 )
 
@@ -79,6 +89,7 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             host: str = user_input[CONF_HOST].strip()
             port: int = user_input[CONF_PORT]
+            transport: str = user_input.get(CONF_TRANSPORT, DEFAULT_TRANSPORT)
             unique_id = f"{host}:{port}"
 
             await self.async_set_unique_id(unique_id)
@@ -90,7 +101,7 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
                 LOGGER.debug("controller key rejected: %s", err)
                 errors[CONF_CONTROLLER_KEY] = "invalid_key"
             else:
-                title, error = await self._probe(host, port, key)
+                title, error = await self._probe(host, port, key, transport)
                 if error is not None:
                     errors["base"] = error
                 else:
@@ -100,6 +111,7 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_HOST: host,
                             CONF_PORT: port,
                             CONF_CONTROLLER_KEY: key.hex(),
+                            CONF_TRANSPORT: transport,
                         },
                     )
 
@@ -121,6 +133,9 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._reauth_entry_data is not None
         host: str = self._reauth_entry_data[CONF_HOST]
         port: int = self._reauth_entry_data[CONF_PORT]
+        transport: str = self._reauth_entry_data.get(
+            CONF_TRANSPORT, DEFAULT_TRANSPORT
+        )
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -129,7 +144,7 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
             except InvalidControllerKey:
                 errors[CONF_CONTROLLER_KEY] = "invalid_key"
             else:
-                _, error = await self._probe(host, port, key)
+                _, error = await self._probe(host, port, key, transport)
                 if error is not None:
                     errors["base"] = error
                 else:
@@ -147,11 +162,20 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
     # ---- helpers ---------------------------------------------------------
 
     async def _probe(
-        self, host: str, port: int, key: bytes
+        self,
+        host: str,
+        port: int,
+        key: bytes,
+        transport: str = DEFAULT_TRANSPORT,
     ) -> tuple[str | None, str | None]:
         """Try to connect once. Returns (title, error_code)."""
         try:
-            async with OmniClient(host, port=port, controller_key=key) as client:
+            async with OmniClient(
+                host,
+                port=port,
+                controller_key=key,
+                transport=transport,  # type: ignore[arg-type]
+            ) as client:
                 info = await client.get_system_information()
         except (HandshakeError, InvalidEncryptionKeyError):
             return None, "invalid_auth"

@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import CONF_CONTROLLER_KEY, DOMAIN, LOGGER
+from .const import (
+    CONF_CONTROLLER_KEY,
+    CONF_TRANSPORT,
+    DEFAULT_TRANSPORT,
+    DOMAIN,
+    LOGGER,
+)
 from .coordinator import OmniDataUpdateCoordinator
 from .services import async_setup_services, async_unload_services
 
@@ -50,12 +56,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         LOGGER.error("stored controller key for %s is corrupt: %s", entry.title, err)
         return False
 
+    transport: str = entry.data.get(CONF_TRANSPORT, DEFAULT_TRANSPORT)
     coordinator = OmniDataUpdateCoordinator(
         hass,
         entry,
         host=host,
         port=port,
         controller_key=controller_key,
+        transport=transport,
     )
 
     try:

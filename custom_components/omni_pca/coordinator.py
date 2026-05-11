@@ -137,6 +137,7 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
         host: str,
         port: int,
         controller_key: bytes,
+        transport: str = "tcp",
     ) -> None:
         super().__init__(
             hass,
@@ -148,6 +149,7 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
         self._host = host
         self._port = port
         self._controller_key = controller_key
+        self._transport = transport
         self._client: OmniClient | None = None
         self._discovery_done = False
         self._discovered: OmniData | None = None
@@ -236,6 +238,7 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
             self._host,
             port=self._port,
             controller_key=self._controller_key,
+            transport=self._transport,  # type: ignore[arg-type]
         )
         # Drive __aenter__ manually so the client survives across update
         # cycles; we close it explicitly on shutdown / failure.

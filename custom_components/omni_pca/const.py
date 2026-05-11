@@ -12,6 +12,11 @@ DEFAULT_PORT: Final = 4369
 DEFAULT_TIMEOUT: Final = 5.0
 
 CONF_CONTROLLER_KEY: Final = "controller_key"
+CONF_TRANSPORT: Final = "transport"
+
+TRANSPORT_TCP: Final = "tcp"
+TRANSPORT_UDP: Final = "udp"
+DEFAULT_TRANSPORT: Final = TRANSPORT_TCP
 
 MANUFACTURER: Final = "HAI / Leviton"
 
