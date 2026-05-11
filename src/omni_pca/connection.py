@@ -26,6 +26,7 @@ import logging
 from collections.abc import AsyncIterator
 from enum import IntEnum
 from types import TracebackType
+from typing import Literal
 
 from .crypto import (
     BLOCK_SIZE,
@@ -104,18 +105,30 @@ class OmniConnection:
         port: int = _DEFAULT_PORT,
         controller_key: bytes = b"",
         timeout: float = 5.0,
+        transport: Literal["tcp", "udp"] = "tcp",
+        udp_retry_count: int = 3,
     ) -> None:
         if len(controller_key) != 16:
             raise ValueError(
                 f"controller_key must be 16 bytes, got {len(controller_key)}"
             )
+        if transport not in ("tcp", "udp"):
+            raise ValueError(f"transport must be 'tcp' or 'udp', got {transport!r}")
         self._host = host
         self._port = port
         self._controller_key = bytes(controller_key)
         self._default_timeout = timeout
+        self._transport_kind: Literal["tcp", "udp"] = transport
+        self._udp_retry_count = max(0, udp_retry_count)
 
+        # TCP transport state
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+
+        # UDP transport state (asyncio.DatagramTransport + our protocol)
+        self._udp_transport: asyncio.DatagramTransport | None = None
+        self._udp_protocol: _OmniDatagramProtocol | None = None
+
         self._state = ConnectionState.DISCONNECTED
 
         self._session_id: bytes | None = None
@@ -167,22 +180,41 @@ class OmniConnection:
         await self.close()
 
     async def connect(self) -> None:
-        """Open the TCP socket and run the 4-step secure-session handshake."""
+        """Open the socket and run the 4-step secure-session handshake.
+
+        Transport is set by the ``transport=`` constructor arg. TCP opens
+        a stream socket; UDP opens a datagram endpoint. Either way, the
+        handshake (and everything else) speaks the same Packet/Message
+        format and crypto.
+        """
         if self._state is not ConnectionState.DISCONNECTED:
             raise ConnectionError(f"already connecting/connected (state={self._state})")
         self._state = ConnectionState.CONNECTING
         try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self._host, self._port),
-                timeout=self._default_timeout,
-            )
+            if self._transport_kind == "tcp":
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self._host, self._port),
+                    timeout=self._default_timeout,
+                )
+                self._reader_task = asyncio.create_task(
+                    self._read_loop(), name=f"omni-conn-reader-{self._host}"
+                )
+            else:
+                # UDP: connectionless. We "connect" the datagram socket to
+                # the panel so we can reject stray datagrams from elsewhere
+                # and use plain `transport.sendto(data)`.
+                loop = asyncio.get_running_loop()
+                self._udp_transport, self._udp_protocol = (
+                    await loop.create_datagram_endpoint(
+                        lambda: _OmniDatagramProtocol(self),
+                        remote_addr=(self._host, self._port),
+                    )
+                )
         except (TimeoutError, OSError) as exc:
             self._state = ConnectionState.DISCONNECTED
-            raise ConnectionError(f"failed to open TCP socket: {exc}") from exc
-
-        self._reader_task = asyncio.create_task(
-            self._read_loop(), name=f"omni-conn-reader-{self._host}"
-        )
+            raise ConnectionError(
+                f"failed to open {self._transport_kind.upper()} socket: {exc}"
+            ) from exc
 
         try:
             await self._do_handshake()
@@ -212,6 +244,12 @@ class OmniConnection:
             self._writer = None
         self._reader = None
 
+        if self._udp_transport is not None:
+            with contextlib.suppress(OSError):
+                self._udp_transport.close()
+            self._udp_transport = None
+            self._udp_protocol = None
+
         if self._reader_task is not None and not self._reader_task.done():
             self._reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -238,17 +276,39 @@ class OmniConnection:
                 f"cannot send request, connection state={self._state.name}"
             )
         message = encode_v2(opcode, payload)
-        seq, fut = self._send_encrypted(message)
-        try:
-            reply_packet = await asyncio.wait_for(
-                fut, timeout if timeout is not None else self._default_timeout
-            )
-        except TimeoutError as exc:
-            self._pending.pop(seq, None)
-            raise RequestTimeoutError(
-                f"no reply for opcode={int(opcode)} seq={seq}"
-            ) from exc
-        return self._decode_inner(reply_packet)
+        per_attempt_timeout = timeout if timeout is not None else self._default_timeout
+        # UDP needs explicit retries since datagram delivery is best-effort.
+        # TCP gets reliable delivery for free; we still keep retry_count for
+        # API uniformity but it defaults to 0 effectively.
+        max_attempts = (
+            1 + self._udp_retry_count if self._transport_kind == "udp" else 1
+        )
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            seq, fut = self._send_encrypted(message)
+            try:
+                reply_packet = await asyncio.wait_for(fut, per_attempt_timeout)
+            except TimeoutError as exc:
+                last_exc = exc
+                self._pending.pop(seq, None)
+                if attempt < max_attempts:
+                    _log.debug(
+                        "udp retry %d/%d on opcode=%d seq=%d",
+                        attempt,
+                        max_attempts,
+                        int(opcode),
+                        seq,
+                    )
+                    continue
+                raise RequestTimeoutError(
+                    f"no reply for opcode={int(opcode)} "
+                    f"after {max_attempts} attempt(s)"
+                ) from last_exc
+            return self._decode_inner(reply_packet)
+        # Loop exit without return only via re-raised timeout above.
+        raise RequestTimeoutError(
+            f"request loop exited without reply for opcode={int(opcode)}"
+        )
 
     def unsolicited(self) -> AsyncIterator[Message]:
         """Async iterator over unsolicited inbound messages (seq=0)."""
@@ -380,17 +440,23 @@ class OmniConnection:
         return seq, fut
 
     def _write_packet(self, pkt: Packet, *, encrypted: bool = False) -> None:
-        if self._writer is None:
-            raise ConnectionError("transport not open")
         wire = pkt.encode()
         _log.debug(
-            "TX seq=%d type=%s len=%d encrypted=%s",
+            "TX[%s] seq=%d type=%s len=%d encrypted=%s",
+            self._transport_kind,
             pkt.seq,
             pkt.type.name,
             len(pkt.data),
             encrypted,
         )
-        self._writer.write(wire)
+        if self._transport_kind == "tcp":
+            if self._writer is None:
+                raise ConnectionError("transport not open")
+            self._writer.write(wire)
+        else:
+            if self._udp_transport is None:
+                raise ConnectionError("transport not open")
+            self._udp_transport.sendto(wire)
 
     def _decode_inner(self, pkt: Packet) -> Message:
         """Decrypt + parse the inner ``Message`` from an OmniLink2Message packet."""
@@ -596,3 +662,46 @@ class OmniConnection:
             return
         if not fut.done():
             fut.set_result(pkt)
+
+
+# --------------------------------------------------------------------------
+# UDP transport
+# --------------------------------------------------------------------------
+
+
+class _OmniDatagramProtocol(asyncio.DatagramProtocol):
+    """asyncio.DatagramProtocol bound to a single OmniConnection.
+
+    Each datagram received on a UDP Omni socket *is* one complete Packet
+    (no stream framing — that is the whole reason UDP is useful here).
+    We just decode it and hand it to the connection's dispatcher.
+    """
+
+    def __init__(self, conn: OmniConnection) -> None:
+        self._conn = conn
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        # transport is a DatagramTransport in this codepath.
+        pass
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        # Each datagram is a complete Packet — no stream framing.
+        # The TCP _dispatch already handles handshake routing, solicited
+        # replies, and unsolicited push, so we just delegate.
+        try:
+            pkt = Packet.decode(data)
+        except Exception as exc:
+            _log.warning("dropping malformed UDP datagram: %s", exc)
+            return
+        try:
+            self._conn._dispatch(pkt)
+        except Exception:
+            _log.exception("UDP dispatch crashed for seq=%d", pkt.seq)
+
+    def error_received(self, exc: Exception) -> None:
+        _log.warning("UDP socket error: %s", exc)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if exc is not None:
+            _log.warning("UDP transport lost: %s", exc)
+

@@ -333,21 +333,41 @@ class MockPanel:
 
     @asynccontextmanager
     async def serve(
-        self, host: str = "127.0.0.1", port: int = 0
+        self,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        transport: str = "tcp",
     ) -> AsyncIterator[tuple[str, int]]:
-        """Start listening; yield ``(host, actual_port)``; tear down on exit."""
+        """Start listening; yield ``(host, actual_port)``; tear down on exit.
+
+        ``transport='tcp'`` (default) opens a stream server matching modern
+        PC Access. ``transport='udp'`` opens a datagram socket — the panel
+        path used by some firmware versions and by the Omni-Link II
+        ``Network_UDP`` configuration. Same wire format either way.
+        """
+        if transport == "tcp":
+            async with self._serve_tcp(host, port) as bound:
+                yield bound
+        elif transport == "udp":
+            async with self._serve_udp(host, port) as bound:
+                yield bound
+        else:
+            raise ValueError(f"transport must be 'tcp' or 'udp', got {transport!r}")
+
+    @asynccontextmanager
+    async def _serve_tcp(
+        self, host: str, port: int
+    ) -> AsyncIterator[tuple[str, int]]:
         server = await asyncio.start_server(self._handle_client, host=host, port=port)
         sockets = server.sockets or ()
         if not sockets:  # pragma: no cover -- start_server always populates this
             raise RuntimeError("asyncio.start_server returned no sockets")
         bound_host, bound_port = sockets[0].getsockname()[:2]
-        _log.debug("mock panel listening on %s:%d", bound_host, bound_port)
+        _log.debug("mock panel (tcp) listening on %s:%d", bound_host, bound_port)
         try:
             async with server:
                 yield bound_host, bound_port
         finally:
-            # Cancel any in-flight push tasks so the test event loop
-            # tears down cleanly.
             for t in list(self._push_tasks):
                 if not t.done():
                     t.cancel()
@@ -355,6 +375,27 @@ class MockPanel:
             server.close()
             with contextlib.suppress(Exception):  # pragma: no cover
                 await server.wait_closed()
+
+    @asynccontextmanager
+    async def _serve_udp(
+        self, host: str, port: int
+    ) -> AsyncIterator[tuple[str, int]]:
+        loop = asyncio.get_running_loop()
+        transport, _protocol = await loop.create_datagram_endpoint(
+            lambda: _MockServerDatagramProtocol(self),
+            local_addr=(host, port),
+        )
+        sockname = transport.get_extra_info("sockname")
+        bound_host, bound_port = sockname[0], sockname[1]
+        _log.debug("mock panel (udp) listening on %s:%d", bound_host, bound_port)
+        try:
+            yield bound_host, bound_port
+        finally:
+            for t in list(self._push_tasks):
+                if not t.done():
+                    t.cancel()
+            self._push_tasks.clear()
+            transport.close()
 
     # -------- connection handling --------
 
@@ -1226,3 +1267,206 @@ async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes | None:
         return await reader.readexactly(n)
     except asyncio.IncompleteReadError:
         return None
+
+
+# --------------------------------------------------------------------------
+# UDP server protocol
+# --------------------------------------------------------------------------
+
+
+class _MockServerDatagramProtocol(asyncio.DatagramProtocol):
+    """Datagram-side implementation of the mock panel.
+
+    Tracks a single active client (the most-recent peer to issue a
+    ``ClientRequestNewSession``) and routes its session state. The same
+    reply-builder helpers (``_reply_system_information``,
+    ``_build_zone_properties``, etc.) on the parent ``MockPanel`` are
+    reused for both transports — the only thing UDP-specific here is
+    framing (each datagram is one complete Packet) and the absence of
+    per-block stream reads.
+    """
+
+    def __init__(self, panel: MockPanel) -> None:
+        self._panel = panel
+        self._transport: asyncio.DatagramTransport | None = None
+        self._client_addr: tuple[str, int] | None = None
+        self._session_id: bytes | None = None
+        self._session_key: bytes | None = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        self._transport = transport  # type: ignore[assignment]
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        if exc is not None:
+            _log.warning("mock panel (udp) transport lost: %s", exc)
+
+    def error_received(self, exc: Exception) -> None:
+        _log.warning("mock panel (udp) socket error: %s", exc)
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        # Each datagram is a complete Packet. Spawn a task so we can do
+        # async work (drain push-event tasks, etc.) without blocking the
+        # protocol callback. We track the task so the GC doesn't drop the
+        # reference mid-flight (RUF006).
+        task = asyncio.create_task(
+            self._handle_datagram(data, addr),
+            name=f"mock-panel-udp-rx-{addr[0]}-{addr[1]}",
+        )
+        self._panel._push_tasks.add(task)
+        task.add_done_callback(self._panel._push_tasks.discard)
+
+    async def _handle_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
+        try:
+            pkt = Packet.decode(data)
+        except Exception as exc:
+            _log.warning("mock panel (udp) malformed datagram from %s: %s", addr, exc)
+            return
+
+        try:
+            await self._dispatch_packet(pkt, addr)
+        except Exception:
+            _log.exception("mock panel (udp) crashed on packet seq=%d", pkt.seq)
+
+    def _send(self, pkt: Packet, addr: tuple[str, int]) -> None:
+        if self._transport is None:
+            return
+        self._transport.sendto(pkt.encode(), addr)
+
+    async def _dispatch_packet(
+        self, pkt: Packet, addr: tuple[str, int]
+    ) -> None:
+        if pkt.type is PacketType.ClientRequestNewSession:
+            session_id = self._panel._session_id_provider()
+            self._session_id = session_id
+            self._session_key = derive_session_key(
+                self._panel._controller_key, session_id
+            )
+            self._client_addr = addr
+            payload = bytes([_PROTO_HI, _PROTO_LO]) + session_id
+            self._send(
+                Packet(
+                    seq=pkt.seq,
+                    type=PacketType.ControllerAckNewSession,
+                    data=payload,
+                ),
+                addr,
+            )
+            return
+
+        if pkt.type is PacketType.ClientRequestSecureSession:
+            if self._session_key is None or self._session_id is None:
+                _log.debug("mock panel (udp) secure-session before NewSession")
+                return
+            try:
+                plaintext = decrypt_message_payload(
+                    pkt.data, pkt.seq, self._session_key
+                )
+            except Exception:
+                _log.debug("mock panel (udp) failed to decrypt secure-session")
+                return
+            if not plaintext.startswith(self._session_id):
+                self._send(
+                    Packet(
+                        seq=pkt.seq,
+                        type=PacketType.ControllerSessionTerminated,
+                        data=b"",
+                    ),
+                    addr,
+                )
+                return
+            ciphertext_out = encrypt_message_payload(
+                self._session_id, pkt.seq, self._session_key
+            )
+            self._send(
+                Packet(
+                    seq=pkt.seq,
+                    type=PacketType.ControllerAckSecureSession,
+                    data=ciphertext_out,
+                ),
+                addr,
+            )
+            self._panel._session_count += 1
+            return
+
+        if pkt.type is PacketType.ClientSessionTerminated:
+            self._session_id = None
+            self._session_key = None
+            self._client_addr = None
+            return
+
+        if pkt.type is PacketType.OmniLink2Message:
+            if self._session_key is None:
+                _log.debug("mock panel (udp) encrypted message before secure session")
+                return
+            await self._handle_encrypted_udp(pkt, addr)
+            return
+
+        _log.debug("mock panel (udp) unhandled packet type %s", pkt.type.name)
+
+    async def _handle_encrypted_udp(
+        self, pkt: Packet, addr: tuple[str, int]
+    ) -> None:
+        assert self._session_key is not None
+        try:
+            plaintext = decrypt_message_payload(
+                pkt.data, pkt.seq, self._session_key
+            )
+        except Exception:
+            _log.debug("mock panel (udp) failed to decrypt v2 message")
+            return
+        try:
+            inner = Message.decode(plaintext)
+        except (MessageCrcError, MessageFormatError):
+            await self._send_reply(pkt.seq, _build_nak(0), addr)
+            return
+
+        opcode = inner.opcode
+        self._panel._last_request_opcode = opcode
+        # _dispatch_v2 is the same opcode-dispatch table the TCP path uses,
+        # returning (reply_message, push_event_words) so we can write the
+        # synchronous reply first then schedule an unsolicited push.
+        reply, push_words = self._panel._dispatch_v2(opcode, inner.payload)
+        await self._send_reply(pkt.seq, reply, addr)
+        if push_words:
+            self._schedule_udp_push(push_words, addr)
+
+    def _schedule_udp_push(
+        self, words: tuple[int, ...], addr: tuple[str, int]
+    ) -> None:
+        """Fire-and-forget unsolicited SystemEvents push to ``addr``."""
+        assert self._session_key is not None
+        session_key = self._session_key
+
+        async def _push() -> None:
+            await asyncio.sleep(_PUSH_DELAY)
+            try:
+                msg = _build_system_events_message(words)
+                plaintext = msg.encode()
+                ciphertext = encrypt_message_payload(plaintext, 0, session_key)
+                pkt = Packet(
+                    seq=0,
+                    type=PacketType.OmniLink2Message,
+                    data=ciphertext,
+                )
+                self._send(pkt, addr)
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            except Exception:  # pragma: no cover - diagnostic only
+                _log.exception("mock panel (udp) failed to push event")
+
+        task = asyncio.create_task(_push(), name="mock-panel-udp-event-push")
+        self._panel._push_tasks.add(task)
+        task.add_done_callback(self._panel._push_tasks.discard)
+
+    async def _send_reply(
+        self, client_seq: int, message: Message, addr: tuple[str, int]
+    ) -> None:
+        assert self._session_key is not None
+        plaintext = message.encode()
+        ciphertext = encrypt_message_payload(plaintext, client_seq, self._session_key)
+        pkt = Packet(
+            seq=client_seq,
+            type=PacketType.OmniLink2Message,
+            data=ciphertext,
+        )
+        self._send(pkt, addr)

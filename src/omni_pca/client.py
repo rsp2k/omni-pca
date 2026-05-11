@@ -20,7 +20,7 @@ import struct
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from enum import IntEnum
 from types import TracebackType
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from .commands import Command, CommandFailedError, SecurityCommandResponse
 
@@ -120,12 +120,20 @@ class OmniClient:
         *,
         controller_key: bytes,
         timeout: float = 5.0,
+        transport: Literal["tcp", "udp"] = "tcp",
+        udp_retry_count: int = 3,
     ) -> None:
+        """``transport='udp'`` if your panel is configured for the
+        ``Network_UDP`` connection type (some firmware versions and the
+        default for many installs). ``udp_retry_count`` is ignored on TCP.
+        """
         self._conn = OmniConnection(
             host=host,
             port=port,
             controller_key=controller_key,
             timeout=timeout,
+            transport=transport,
+            udp_retry_count=udp_retry_count,
         )
         self._subscriber_task: asyncio.Task[None] | None = None
 
