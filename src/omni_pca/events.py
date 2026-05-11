@@ -127,17 +127,22 @@ class UpbLinkAction(IntEnum):
 # --------------------------------------------------------------------------
 
 
-def _ensure_system_events(message: Message) -> bytes:
-    """Validate that ``message`` is a v2 SystemEvents reply, return its
-    payload bytes (everything after the opcode).
+def _ensure_system_events(
+    message: Message,
+    expected_opcode: int = int(OmniLink2MessageType.SystemEvents),
+) -> bytes:
+    """Validate that ``message`` is a SystemEvents reply, return payload bytes.
 
-    Reference: clsOLMsgSystemEvents.cs (entire file) — the message body
-    is just ``[opcode][word1_hi][word1_lo][word2_hi][word2_lo]…``.
+    The v1 and v2 SystemEvents inner-message bodies are byte-identical
+    (clsOLMsgSystemEvents.cs vs clsOL2MsgSystemEvents.cs both yield
+    ``[opcode][word1_hi][word1_lo][word2_hi][word2_lo]…``); only the
+    opcode byte differs (35 vs 55). Pass ``expected_opcode`` to dispatch
+    the v1 path from :class:`omni_pca.v1.adapter.OmniClientV1Adapter`.
     """
-    if message.opcode != int(OmniLink2MessageType.SystemEvents):
+    if message.opcode != expected_opcode:
         raise ValueError(
-            "not a SystemEvents message: opcode "
-            f"{message.opcode} (expected {int(OmniLink2MessageType.SystemEvents)})"
+            f"not a SystemEvents message: opcode {message.opcode} "
+            f"(expected {expected_opcode})"
         )
     payload = message.payload
     if len(payload) % 2 != 0:
@@ -700,18 +705,23 @@ def _classify(word: int) -> SystemEvent:
 # --------------------------------------------------------------------------
 
 
-def parse_events(message: Message) -> list[SystemEvent]:
-    """Decode a v2 ``SystemEvents`` (opcode 55) message into typed events.
+def parse_events(
+    message: Message,
+    expected_opcode: int = int(OmniLink2MessageType.SystemEvents),
+) -> list[SystemEvent]:
+    """Decode a ``SystemEvents`` message into typed events.
 
     The panel batches multiple state changes into a single message, so
     the return type is always a list — even for messages that carry just
     one event. Empty SystemEvents messages return an empty list rather
     than raising.
 
-    Reference: clsOLMsgSystemEvents.cs:10-18 (SystemEventsCount + per-
-    word accessor).
+    ``expected_opcode`` defaults to v2 (55); pass v1's value (35) when
+    decoding from a ``v1.OmniConnectionV1`` push stream.
+
+    Reference: clsOLMsgSystemEvents.cs / clsOL2MsgSystemEvents.cs.
     """
-    payload = _ensure_system_events(message)
+    payload = _ensure_system_events(message, expected_opcode)
     return [_classify(w) for w in _iter_event_words(payload)]
 
 
@@ -790,6 +800,7 @@ class EventStream:
     """
 
     source: object  # OmniConnection or duck-typed equivalent
+    expected_opcode: int = int(OmniLink2MessageType.SystemEvents)
     _buffer: list[SystemEvent] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -817,10 +828,10 @@ class EventStream:
                 raise
             except asyncio.CancelledError:
                 raise
-            if msg.opcode != int(OmniLink2MessageType.SystemEvents):
+            if msg.opcode != self.expected_opcode:
                 # Non-event message (Status, Ack, …) — silently ignore.
                 continue
-            self._buffer = parse_events(msg)
+            self._buffer = parse_events(msg, self.expected_opcode)
         return self._buffer.pop(0)
 
 

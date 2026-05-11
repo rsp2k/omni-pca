@@ -168,15 +168,40 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
         key: bytes,
         transport: str = DEFAULT_TRANSPORT,
     ) -> tuple[str | None, str | None]:
-        """Try to connect once. Returns (title, error_code)."""
+        """Try to connect once. Returns (title, error_code).
+
+        TCP uses :class:`OmniClient` (v2 wire protocol). UDP uses the v1
+        adapter — UDP-listening panels speak the legacy wire protocol,
+        not OmniLink2 — see :mod:`omni_pca.v1.adapter` for the bridge.
+        """
         try:
-            async with OmniClient(
-                host,
-                port=port,
-                controller_key=key,
-                transport=transport,  # type: ignore[arg-type]
-            ) as client:
-                info = await client.get_system_information()
+            if transport == TRANSPORT_UDP:
+                from omni_pca.v1 import (
+                    HandshakeError as V1HandshakeError,
+                )
+                from omni_pca.v1 import (
+                    InvalidEncryptionKeyError as V1InvalidEncryptionKeyError,
+                )
+                from omni_pca.v1 import OmniClientV1Adapter
+                from omni_pca.v1.connection import (
+                    ConnectionError as V1ConnectionError,
+                )
+
+                try:
+                    async with OmniClientV1Adapter(
+                        host, port=port, controller_key=key,
+                    ) as client:
+                        info = await client.get_system_information()
+                except (V1HandshakeError, V1InvalidEncryptionKeyError):
+                    return None, "invalid_auth"
+                except (V1ConnectionError, OSError, TimeoutError) as err:
+                    LOGGER.debug("v1 probe failed: %s", err)
+                    return None, "cannot_connect"
+            else:
+                async with OmniClient(
+                    host, port=port, controller_key=key, transport=transport,  # type: ignore[arg-type]
+                ) as client:
+                    info = await client.get_system_information()
         except (HandshakeError, InvalidEncryptionKeyError):
             return None, "invalid_auth"
         except (OmniConnectionError, OSError, TimeoutError) as err:

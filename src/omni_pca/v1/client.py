@@ -415,11 +415,22 @@ class OmniClientV1:
         end: int,
         parser: Callable[[bytes, int], list[T]],
     ) -> dict[int, T]:
-        if not 1 <= start <= end <= 0xFF:
+        if not 1 <= start <= end <= 0xFFFF:
             raise ValueError(
-                f"invalid range: start={start}, end={end} (must be 1..255 with start<=end)"
+                f"invalid range: start={start}, end={end} "
+                f"(must be 1..65535 with start<=end)"
             )
-        payload = bytes([start, end])
+        # v1 has two payload forms (clsOLMsgRequestUnitStatus.cs:18-31):
+        # short (3-byte msg with 1-byte start+end) when both ≤ 255, long
+        # (5-byte msg with BE u16 start+end) otherwise. The panel picks
+        # the right reply format based on what it received.
+        if start <= 0xFF and end <= 0xFF:
+            payload = bytes([start, end])
+        else:
+            payload = bytes(
+                [(start >> 8) & 0xFF, start & 0xFF,
+                 (end >> 8) & 0xFF,   end & 0xFF]
+            )
         reply = await self._conn.request(request_op, payload)
         self._expect(reply.opcode, reply_op)
         records = parser(reply.payload, start)

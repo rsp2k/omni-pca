@@ -13,6 +13,7 @@ V1 for Modem/UDP/Serial, V2 only for TCP).
 
 from __future__ import annotations
 
+from .adapter import OmniClientV1Adapter
 from .client import OmniClientV1, OmniNakError, OmniProtocolError
 from .connection import (
     HandshakeError,
@@ -37,6 +38,7 @@ __all__ = [
     "NameRecord",
     "NameType",
     "OmniClientV1",
+    "OmniClientV1Adapter",
     "OmniConnectionV1",
     "OmniNakError",
     "OmniProtocolError",

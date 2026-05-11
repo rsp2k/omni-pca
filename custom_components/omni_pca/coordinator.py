@@ -234,12 +234,25 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
     async def _ensure_connected(self) -> OmniClient:
         if self._client is not None:
             return self._client
-        client = OmniClient(
-            self._host,
-            port=self._port,
-            controller_key=self._controller_key,
-            transport=self._transport,  # type: ignore[arg-type]
-        )
+        if self._transport == "udp":
+            # Panels listening UDP-only speak the v1 wire protocol, not
+            # v2. The adapter exposes the OmniClient API surface this
+            # coordinator was written against, but underneath it drives
+            # an OmniConnectionV1 + the typed v1 status/command opcodes.
+            from omni_pca.v1 import OmniClientV1Adapter
+
+            client: OmniClient = OmniClientV1Adapter(  # type: ignore[assignment]
+                self._host,
+                port=self._port,
+                controller_key=self._controller_key,
+            )
+        else:
+            client = OmniClient(
+                self._host,
+                port=self._port,
+                controller_key=self._controller_key,
+                transport=self._transport,  # type: ignore[arg-type]
+            )
         # Drive __aenter__ manually so the client survives across update
         # cycles; we close it explicitly on shutdown / failure.
         await client.__aenter__()
@@ -392,9 +405,15 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
         client's internal parser table only covers zones/units/areas in
         v1.0). We drive ``RequestProperties`` directly on the connection
         so we don't have to monkey-patch the library.
+
+        On UDP/v1 panels there is no ``RequestProperties`` opcode at all,
+        so we fall back to the v1 adapter's name-stream-based discovery
+        (each object's ``Properties`` is synthesized from its name).
         """
         if parser is None or OBJECT_TYPE_TO_PROPERTIES.get(int(object_type)) is None:
             return {}
+        if self._transport == "udp":
+            return await self._walk_properties_v1(client, object_type)
         out: dict[int, object] = {}
         cursor = 0
         conn = client.connection
@@ -441,6 +460,42 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
             cursor = index_attr
             if cursor >= MAX_OBJECT_INDEX:
                 break
+        return out
+
+    async def _walk_properties_v1(
+        self, client: OmniClient, object_type: ObjectType
+    ) -> dict[int, object]:
+        """V1 fallback for :meth:`_walk_properties`.
+
+        v1 has no RequestProperties opcode — names come from streaming
+        UploadNames and the rest of the Properties fields can't be
+        recovered from the wire. We delegate to the adapter's
+        ``get_object_properties`` (which synthesizes a minimal record
+        from the cached name list) and skip anything it returns ``None``
+        for.
+        """
+        # Pick the right per-type name lister. The adapter caches the
+        # UploadNames stream output so these are nearly free after the
+        # first call this discovery pass.
+        if object_type == ObjectType.THERMOSTAT:
+            names = await client.list_thermostat_names()  # type: ignore[attr-defined]
+        elif object_type == ObjectType.BUTTON:
+            names = await client.list_button_names()  # type: ignore[attr-defined]
+        else:
+            # Programs / Messages / etc — nothing to walk.
+            return {}
+        out: dict[int, object] = {}
+        for idx in sorted(names):
+            try:
+                props = await client.get_object_properties(object_type, idx)
+            except Exception:
+                LOGGER.debug(
+                    "v1 properties synth failed for %s #%d",
+                    object_type.name, idx, exc_info=True,
+                )
+                continue
+            if props is not None:
+                out[idx] = props
         return out
 
     @staticmethod
