@@ -39,6 +39,19 @@ The reply (ExecuteSecurityCommandResponse, opcode 75) carries a single
 status byte at ``payload[0]`` whose values are listed in
 ``enuSecurityCommnadResponse.cs`` — :class:`SecurityCommandResponse`
 mirrors that enum.
+
+Cross-references (HAI OmniPro II Owner's Manual):
+    Chapter "CONTROL" (pca-re/docs/owner_manual/05_CONTROL/) documents
+        the user-facing keypad keys that map to these commands —
+        e.g. UNIT_ON/OFF + UNIT_LEVEL are what a homeowner triggers via
+        the "Control → 1 (Unit)" menu, SHOW_MESSAGE_WITH_BEEP is
+        invoked from "Control → Message → Show".
+    Chapter "Scene Commands" (06_Scene_Commands/) covers
+        COMPOSE_SCENE and the per-room scene-recall path.
+    Chapter "SECURITY SYSTEM OPERATION" (03_SECURITY_SYSTEM_OPERATION/)
+        documents what each SecurityMode byte (0-6) means at the user
+        level — the arming menu, entry/exit-delay semantics, and which
+        zones each mode arms.
 """
 
 from __future__ import annotations

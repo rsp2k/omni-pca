@@ -29,6 +29,16 @@ References (decompiled C# source):
                                        — bit-mask classifier we mirror below
     clsText.cs:1693-1911 (GetEventText)
                                        — per-category sub-field extraction
+
+Cross-references (HAI OmniPro II Installation Manual):
+    APPENDIX A — CONTACT ID REPORTING FORMAT (p68): the Contact ID
+        event codes the panel transmits to a central monitoring station
+        for each :class:`AlarmKind`. The class names below mirror those
+        codes one-for-one. (pca-re/docs/manuals/installation_manual/
+        10_APPENDIX_A_CONTACT_ID_REPORTING_FORMAT/)
+    APPENDIX B — DIGITAL COMMUNICATOR CODE SHEET (p69-73): the 4/2 and
+        3/1 reporting-format code tables. Useful when correlating a
+        SystemEvents word with what a central station would see. (12_…)
 """
 
 from __future__ import annotations

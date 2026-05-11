@@ -490,18 +490,25 @@ class ObjectType(IntEnum):
 class SecurityMode(IntEnum):
     """Area security mode (enuSecurityMode.cs).
 
-    Values 9..14 are the "arming in progress" variants the panel reports
-    while a delayed-arm timer is running.
+    The first 7 values are what the user actually picks at the keypad
+    when arming. Values 9..14 are the "arming in progress" variants the
+    panel reports while a delayed-arm timer is running.
+
+    Reference: HAI OmniPro II Owner's Manual, *Security System
+    Operation* chapter (pca-re/docs/owner_manual/
+    03_SECURITY_SYSTEM_OPERATION/) — the user-facing semantics of each
+    mode (entry/exit delays, which zones are armed, when to use which)
+    come from there.
     """
 
-    OFF = 0
-    DAY = 1
-    NIGHT = 2
-    AWAY = 3
-    VACATION = 4
-    DAY_INSTANT = 5
-    NIGHT_DELAYED = 6
-    ANY_CHANGE = 7
+    OFF = 0            # disarmed; resets fire / emergency alarms, silences sirens
+    DAY = 1            # perimeter armed, interior motion NOT armed, entry delay
+    NIGHT = 2          # perimeter + non-sleeping-area motion armed, NO entry delay
+    AWAY = 3           # everything armed, both exit + entry delays
+    VACATION = 4       # same as AWAY but for multi-day absences
+    DAY_INSTANT = 5    # DAY with no entry delay (instant alarm on perimeter)
+    NIGHT_DELAYED = 6  # NIGHT with entry delay on entry-exit zones
+    ANY_CHANGE = 7     # programming-condition wildcard, NOT a real arming state
     ARMING_DAY = 9
     ARMING_NIGHT = 10
     ARMING_AWAY = 11
@@ -560,6 +567,13 @@ class ZoneType(IntEnum):
     the temperature/humidity sensors and a handful of utility types. Any
     raw byte value still round-trips through ``ZoneStatus.zone_type`` —
     it just won't have a named enum member.
+
+    Reference: HAI OmniPro II Installation Manual, *Installer Setup →
+    SETUP ZONES → ZONE TYPES* table (pca-re/docs/manuals/
+    installation_manual/04_INSTALLER_SETUP/INSTALLER_SETUP.md, p38-39).
+    The byte values and short names here match the installer-setup
+    keypad selections one-for-one (e.g. ``PERIMETER = 1`` is the same
+    "PERIMETER" the installer scrolls to when setting Z1..Z176 types).
     """
 
     ENTRY_EXIT = 0
