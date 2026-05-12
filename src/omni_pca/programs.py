@@ -146,6 +146,44 @@ class Days(IntFlag):
     SUNDAY = 0x80
 
 
+class TimeKind(IntEnum):
+    """How the ``hour`` / ``minute`` bytes of a TIMED program are interpreted.
+
+    PC Access overloads the ``Hr`` byte as a one-of-three discriminator:
+    a value in 0..23 means an absolute wall-clock time; ``Hr == 25``
+    means sunrise-relative; ``Hr == 26`` means sunset-relative. For
+    the two relative kinds, ``Min`` is read as a **signed** byte
+    (-128..127): a positive value is minutes *after* sunrise/sunset,
+    a negative value is minutes *before*, and zero is "at".
+
+    Reference: frmPopUpEditTime.cs:186-217 (decode), :241-263 (encode).
+    """
+
+    ABSOLUTE = 0
+    SUNRISE = 1
+    SUNSET = 2
+
+
+_HR_SUNRISE_SENTINEL = 25
+_HR_SUNSET_SENTINEL = 26
+
+
+def _classify_time(hour: int, minute: int) -> tuple[TimeKind, int]:
+    """Decode ``(hour, minute)`` bytes into a ``(kind, value)`` pair.
+
+    For ``TimeKind.ABSOLUTE`` the ``value`` is the minute byte 0..59
+    (caller should also use the ``hour`` field for the full time). For
+    sunrise / sunset, ``value`` is the signed minutes offset.
+    """
+    if hour == _HR_SUNRISE_SENTINEL:
+        offset = minute if minute < 0x80 else minute - 0x100
+        return TimeKind.SUNRISE, offset
+    if hour == _HR_SUNSET_SENTINEL:
+        offset = minute if minute < 0x80 else minute - 0x100
+        return TimeKind.SUNSET, offset
+    return TimeKind.ABSOLUTE, minute & 0xFF
+
+
 # Once-per-process warnings — see _warn_unknown.
 _warned_unknown: set[tuple[str, int]] = set()
 
@@ -341,6 +379,50 @@ class Program:
         return bytes(buf)
 
     # ---- convenience -------------------------------------------------
+
+    @property
+    def time_kind(self) -> TimeKind:
+        """Classify the ``hour`` byte as absolute / sunrise / sunset.
+
+        Only meaningful for TIMED programs; for other ``prog_type``
+        values the return is still computed mechanically but has no
+        semantic interpretation.
+        """
+        return _classify_time(self.hour, self.minute)[0]
+
+    @property
+    def time_offset_minutes(self) -> int:
+        """Signed minutes-offset for sunrise/sunset-relative TIMED programs.
+
+        Returns 0 for absolute-time programs (and for non-TIMED types,
+        whose ``hour`` / ``minute`` bytes aren't time-of-day at all).
+        Positive = after sunrise/sunset, negative = before, zero = at.
+        """
+        kind, value = _classify_time(self.hour, self.minute)
+        return value if kind in (TimeKind.SUNRISE, TimeKind.SUNSET) else 0
+
+    def format_time(self) -> str:
+        """Human-readable rendering of the TIMED time-of-day.
+
+        Examples:
+            ``"07:15"`` for an absolute-time program.
+            ``"at sunrise"`` for ``hour==25, minute==0``.
+            ``"30 min before sunset"`` for ``hour==26, minute==226`` (sbyte -30).
+
+        Returns the raw ``"hh:mm"`` form for non-TIMED programs even
+        though it's semantically meaningless there; callers should
+        check ``prog_type`` first.
+        """
+        kind, value = _classify_time(self.hour, self.minute)
+        if kind == TimeKind.SUNRISE:
+            if value == 0:
+                return "at sunrise"
+            return f"{abs(value)} min {'after' if value > 0 else 'before'} sunrise"
+        if kind == TimeKind.SUNSET:
+            if value == 0:
+                return "at sunset"
+            return f"{abs(value)} min {'after' if value > 0 else 'before'} sunset"
+        return f"{self.hour:02d}:{self.minute:02d}"
 
     @property
     def event_id(self) -> int:

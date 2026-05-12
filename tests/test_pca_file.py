@@ -159,21 +159,24 @@ def test_programs_sanity_invariants() -> None:
     """Coarse invariants on the 330 defined programs.
 
     The byte-for-byte round-trip test above is the load-bearing
-    correctness signal. This adds light coverage to catch a Mon/Day
-    swap regression specifically on YEARLY-typed programs (which use
-    bytes 9/10 as a true calendar date).
+    correctness signal. The asserts here are belt-and-suspenders:
 
-    What we DON'T assert and why:
-
-    * **EVENT** programs encode a u16 event identifier in bytes 9/10
-      (see ``clsProgram.Evt`` at lines 152-163), not a calendar date.
-    * **TIMED** programs use bytes 12/13 either as absolute hour:minute
-      (0-23 : 0-59) *or* as a sunrise/sunset-relative offset
-      (Owner's Manual: ±0-120 minutes), with a flag we haven't
-      reverse-engineered yet. So hour=26 / minute=246 are valid wire
-      values in the absence of that flag decoder.
+    * **YEARLY** uses bytes 9/10 as a real calendar date.
+    * **TIMED** programs come in two flavors:
+      ABSOLUTE (``hour`` 0..23, ``minute`` 0..59) and
+      sunrise/sunset-relative (``hour`` == 25 or 26 — see
+      :class:`omni_pca.programs.TimeKind`). The decoder classifies via
+      ``Program.time_kind``; ABSOLUTE-time programs must hit real
+      wall-clock ranges.
+    * **EVENT** encodes a u16 event ID in bytes 9/10 rather than
+      a calendar date (see ``clsProgram.Evt``); no calendar assertion.
     """
-    from omni_pca.programs import ProgramType, decode_program_table, iter_defined
+    from omni_pca.programs import (
+        ProgramType,
+        TimeKind,
+        decode_program_table,
+        iter_defined,
+    )
 
     blob = _load_programs_blob_or_skip()
     programs = decode_program_table(blob)
@@ -188,6 +191,21 @@ def test_programs_sanity_invariants() -> None:
         assert 1 <= p.day <= 31, (
             f"slot {p.slot} YEARLY: day={p.day}"
         )
+
+    timed = [p for p in defined if p.prog_type == int(ProgramType.TIMED)]
+    assert timed, "fixture should have TIMED programs"
+    for p in timed:
+        assert p.days != 0, f"slot {p.slot}: TIMED with no days mask"
+        if p.time_kind == TimeKind.ABSOLUTE:
+            assert 0 <= p.hour <= 23, (
+                f"slot {p.slot} TIMED-ABSOLUTE: hour={p.hour}"
+            )
+            assert 0 <= p.minute <= 59, (
+                f"slot {p.slot} TIMED-ABSOLUTE: minute={p.minute}"
+            )
+        else:
+            # Sunrise/sunset offsets fit in a signed byte.
+            assert -128 <= p.time_offset_minutes <= 127
 
 
 def test_remarks_walker_on_empty_table() -> None:

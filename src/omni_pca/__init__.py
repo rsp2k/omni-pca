@@ -7,6 +7,7 @@ from .programs import (
     Program,
     ProgramCond,
     ProgramType,
+    TimeKind,
     decode_program_table,
     iter_defined,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "Program",
     "ProgramCond",
     "ProgramType",
+    "TimeKind",
     "__version__",
     "decode_program_table",
     "iter_defined",

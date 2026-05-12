@@ -245,3 +245,55 @@ def test_days_bitmask_values() -> None:
     assert Days.MONDAY == 0x02
     assert Days.SUNDAY == 0x80
     assert Days.MONDAY | Days.WEDNESDAY | Days.FRIDAY == 0x2A
+
+
+# ---- TimeKind classification + sunrise/sunset offsets ----------------------
+
+
+from omni_pca.programs import TimeKind  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "hour, minute, expected_kind, expected_offset, expected_label",
+    [
+        # Absolute times — hour 0..23, minute 0..59.
+        (0, 0, TimeKind.ABSOLUTE, 0, "00:00"),
+        (7, 15, TimeKind.ABSOLUTE, 0, "07:15"),
+        (23, 59, TimeKind.ABSOLUTE, 0, "23:59"),
+        # Sunrise-relative.
+        (25, 0, TimeKind.SUNRISE, 0, "at sunrise"),
+        (25, 30, TimeKind.SUNRISE, 30, "30 min after sunrise"),
+        (25, 226, TimeKind.SUNRISE, -30, "30 min before sunrise"),
+        (25, 255, TimeKind.SUNRISE, -1, "1 min before sunrise"),
+        (25, 127, TimeKind.SUNRISE, 127, "127 min after sunrise"),
+        # Sunset-relative.
+        (26, 0, TimeKind.SUNSET, 0, "at sunset"),
+        (26, 10, TimeKind.SUNSET, 10, "10 min after sunset"),
+        (26, 246, TimeKind.SUNSET, -10, "10 min before sunset"),
+        (26, 128, TimeKind.SUNSET, -128, "128 min before sunset"),
+    ],
+)
+def test_time_kind_classification(
+    hour, minute, expected_kind, expected_offset, expected_label
+) -> None:
+    p = Program(
+        prog_type=int(ProgramType.TIMED),
+        hour=hour, minute=minute, days=int(Days.MONDAY),
+    )
+    assert p.time_kind == expected_kind
+    assert p.time_offset_minutes == expected_offset
+    assert p.format_time() == expected_label
+
+
+def test_time_kind_round_trip_through_wire() -> None:
+    """Build a sunset-relative program, encode → decode → assert preserved."""
+    p = Program(
+        prog_type=int(ProgramType.TIMED),
+        hour=26, minute=246,  # 10 min before sunset
+        days=int(Days.FRIDAY | Days.SATURDAY),
+    )
+    body = p.encode_wire_bytes()
+    p2 = Program.from_wire_bytes(body)
+    assert p2.time_kind == TimeKind.SUNSET
+    assert p2.time_offset_minutes == -10
+    assert p2.format_time() == "10 min before sunset"
