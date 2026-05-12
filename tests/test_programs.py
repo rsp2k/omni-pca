@@ -417,3 +417,154 @@ def test_misc_conditional_enum_matches_csharp() -> None:
     assert MiscConditional.AC_POWER_OFF == 8
     assert MiscConditional.BATTERY_OK == 11
     assert MiscConditional.ENERGY_COST_CRITICAL == 15
+
+
+# ---- multi-record (firmware ≥3.0.0) decoder properties ----------------
+
+
+def test_is_multi_record_classifier() -> None:
+    """Compact-form ProgTypes (0-4) are NOT multi-record; 5-10 ARE."""
+    for pt in (
+        ProgramType.FREE,
+        ProgramType.TIMED,
+        ProgramType.EVENT,
+        ProgramType.YEARLY,
+        ProgramType.REMARK,
+    ):
+        p = Program(prog_type=int(pt))
+        assert not p.is_multi_record(), f"{pt.name} should NOT be multi-record"
+    for pt in (
+        ProgramType.WHEN,
+        ProgramType.AT,
+        ProgramType.EVERY,
+        ProgramType.AND,
+        ProgramType.OR,
+        ProgramType.THEN,
+    ):
+        p = Program(prog_type=int(pt))
+        assert p.is_multi_record(), f"{pt.name} SHOULD be multi-record"
+
+
+def test_when_event_id_zone_5_secure() -> None:
+    """WHEN record bytes 9-10 = (family, instance) in BE wire form.
+
+    Empirical capture: "WHEN ZONE 5 SECURE" yields bytes 9-10 = [04, 05]
+    → event_id = 0x0405 (= (ZONE=4, instance=5)).
+    """
+    body = bytes.fromhex("05 00 00 00 00 00 00 00 00 04 05 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=17)
+    assert p.prog_type == ProgramType.WHEN
+    assert p.event_id == 0x0405
+    # The family code 0x04 in the high byte matches ProgramCond.ZONE
+    assert (p.event_id >> 8) & 0xFC == 0x04  # ZONE family
+    assert p.event_id & 0xFF == 0x05  # zone # 5
+
+
+def test_when_event_id_zone_1_secure() -> None:
+    """Second WHEN capture: ZONE 1 SECURE → event_id 0x0401."""
+    body = bytes.fromhex("05 00 00 00 00 00 00 00 00 04 01 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=6)
+    assert p.prog_type == ProgramType.WHEN
+    assert p.event_id == 0x0401
+
+
+def test_every_interval_5_seconds() -> None:
+    """EVERY record: interval at bytes 3-4 BE.
+
+    Empirical capture: "EVERY 5 SECONDS" trigger yields
+    08 00 00 00 05 00 ... at byte positions 0-5 (ProgType=7 at byte 0,
+    then zeros until byte 4 = 0x05 holding the interval low byte).
+    """
+    body = bytes.fromhex("07 00 00 00 05 00 00 00 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=2)
+    assert p.prog_type == ProgramType.EVERY
+    assert p.every_interval == 5
+
+
+def test_and_unit_1_on() -> None:
+    """AND IF UNIT 1 ON: byte 1 = 0x0A (CTRL family + ON bit), bytes 3-4 BE = 1.
+
+    Empirical capture from block 9 slot 18 — the structured AND test.
+    """
+    body = bytes.fromhex("08 0a 00 00 01 00 00 00 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=18)
+    assert p.prog_type == ProgramType.AND
+    # Byte 1 = 0x0a in the high byte means CTRL family (0x08) + ON bit (0x02)
+    assert p.and_family == 0x0A
+    # Family code (top 6 bits): CTRL = 0x08
+    assert p.and_family & 0xFC == 0x08
+    # Operand bit (bit 1 of family byte = bit 9 of compact cond u16): ON
+    assert p.and_family & 0x02 == 0x02
+    # Instance = unit #
+    assert p.and_instance == 1
+
+
+def test_and_zone_5_secure() -> None:
+    """AND IF ZONE 5 SECURE: byte 1 = 0x04 (ZONE + SECURE), bytes 3-4 BE = 5."""
+    body = bytes.fromhex("08 04 00 00 05 00 00 00 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=7)
+    assert p.prog_type == ProgramType.AND
+    assert p.and_family == 0x04  # ZONE family, SECURE operand (bit 1 = 0)
+    assert p.and_family & 0xFC == 0x04  # ZONE family
+    assert p.and_family & 0x02 == 0  # SECURE (operand bit clear)
+    assert p.and_instance == 5  # zone # 5
+
+
+def test_and_never() -> None:
+    """AND IF NEVER: byte 1 = 0x00 (OTHER family), bytes 3-4 BE = 1 (NEVER value)."""
+    body = bytes.fromhex("08 00 00 00 01 00 00 00 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=8)
+    assert p.prog_type == ProgramType.AND
+    assert p.and_family == 0x00  # OTHER family
+    assert p.and_instance == int(MiscConditional.NEVER)  # = 1
+
+
+def test_at_record_layout() -> None:
+    """AT record (multi-record TIMED): same byte layout as compact TIMED.
+
+    Empirical capture: AT 12:01 AM all-7-days yields:
+        06 00 00 00 00 00 00 00 00 05 0c fe 00 01
+    Where bytes 9-10 = [05, 0c] (month=5, day=12; no Mon/Day swap
+    since AT isn't EVENT-typed), byte 11 = 0xfe (Days: all 7),
+    bytes 12-13 = 00:01.
+    """
+    body = bytes.fromhex("06 00 00 00 00 00 00 00 00 05 0c fe 00 01".replace(" ", ""))
+    p = Program.from_file_record(body, slot=7)
+    assert p.prog_type == ProgramType.AT
+    assert p.month == 5
+    assert p.day == 12
+    assert p.days == 0xFE  # MTWTFSS (bit 1 through bit 7)
+    assert p.hour == 0
+    assert p.minute == 1
+
+
+def test_or_record_is_pure_discriminator() -> None:
+    """OR record: only ProgType set, all other bytes zero."""
+    body = bytes.fromhex("09 00 00 00 00 00 00 00 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=10)
+    assert p.prog_type == ProgramType.OR
+    assert p.cond == 0
+    assert p.cond2 == 0
+    assert p.cmd == 0
+    assert p.par == 0
+    assert p.pr2 == 0
+    assert p.month == 0
+    assert p.day == 0
+    assert p.days == 0
+    assert p.hour == 0
+    assert p.minute == 0
+
+
+def test_then_record_uses_compact_action_layout() -> None:
+    """THEN record (multi-record action): same cmd/par/pr2 layout as compact form.
+
+    Empirical capture: THEN UNIT 1 ON yields
+        0a 00 00 00 00 01 00 01 00 00 00 00 00 00
+    with cmd=1 (On), par=0, pr2=1 (UNIT 1, LE).
+    """
+    body = bytes.fromhex("0a 00 00 00 00 01 00 01 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=10)
+    assert p.prog_type == ProgramType.THEN
+    assert p.cmd == 1  # enuUnitCommand.On
+    assert p.par == 0
+    assert p.pr2 == 1  # UNIT 1 (LE u16 at bytes 7-8, same as compact)

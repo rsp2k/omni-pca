@@ -765,14 +765,87 @@ class Program:
 
     @property
     def event_id(self) -> int:
-        """The 16-bit event identifier (only meaningful for EVENT type).
+        """The 16-bit event identifier (only meaningful for EVENT or WHEN type).
 
-        Composed as ``(month << 8) | day`` per ``clsProgram.Evt``. For
-        non-EVENT program types this is a curiosity at best — it will
-        still be a 16-bit value but the calendar fields it draws from
+        Composed as ``(month << 8) | day`` per ``clsProgram.Evt``. Holds the
+        same wire-form value for both compact-form ``EVENT`` records and
+        multi-record ``WHEN`` records — both use bytes 9-10 in BE order
+        (the file-form Mon/Day swap is undone by ``from_file_record``).
+        For non-EVENT / non-WHEN types this is a curiosity: the value is
+        still a 16-bit composition, but the calendar fields it draws from
         carry their direct meaning instead.
         """
         return ((self.month & 0xFF) << 8) | (self.day & 0xFF)
+
+    # ---- multi-record (firmware ≥3.0.0) decoder properties ----
+
+    def is_multi_record(self) -> bool:
+        """True iff this record is one of the multi-record ProgTypes.
+
+        Multi-record types (``WHEN`` / ``AT`` / ``EVERY`` / ``AND`` /
+        ``OR`` / ``THEN``, values 5-10) appear only on firmware
+        ≥3.0.0. They form a sequential block: one record per visual
+        line in the PC Access program-block editor. A complete block
+        is therefore a *contiguous run* of multi-record records, not
+        a single record.
+        """
+        return self.prog_type >= ProgramType.WHEN
+
+    @property
+    def and_family(self) -> int:
+        """For AND records (ProgType=8): the condition family + operand bits.
+
+        Mirrors the *high byte* of the compact-form ``cond`` u16 — same
+        ``ProgramCond`` family codes (``ZONE=0x04``, ``CTRL=0x08``,
+        ``TIME=0x0C``, ``SEC=0x10``) plus bit 1 (= bit 9 of the u16)
+        as the operand (e.g. ``0x0A`` = CTRL + ON, ``0x06`` = ZONE +
+        NOT_READY).
+
+        Empirical evidence: ``AND IF ZONE 5 SECURE`` → ``0x04``,
+        ``AND IF UNIT 1 ON`` → ``0x0A``, ``AND IF NEVER`` → ``0x00``.
+
+        Only meaningful when ``prog_type == AND``. For other types the
+        value is whatever happens to be at byte 1 of the record.
+        """
+        # Disk byte 1 ↔ low byte of the LE-decoded ``cond`` field
+        # (the Read function's LE swap puts disk byte 1 into the high
+        # nibble of the in-memory u16, which we then expose as ``cond``).
+        return self.cond & 0xFF
+
+    @property
+    def and_instance(self) -> int:
+        """For AND records (ProgType=8): the object/instance number.
+
+        Stored as a BE u16 at bytes 3-4 of the AND record. Returns:
+        zone # for ZONE family, unit # for CTRL family,
+        ``MiscConditional`` value for OTHER family, etc.
+
+        Empirical evidence: ``AND IF ZONE 5 SECURE`` → 5,
+        ``AND IF UNIT 1 ON`` → 1, ``AND IF NEVER`` → 1
+        (MiscConditional.NEVER).
+
+        Only meaningful when ``prog_type == AND``.
+        """
+        # Disk bytes 3-4 = BE u16, but ``cond2`` was LE-decoded.
+        # The BE-interpreted value is the byte-swap of ``cond2``.
+        return ((self.cond2 & 0xFF) << 8) | ((self.cond2 >> 8) & 0xFF)
+
+    @property
+    def every_interval(self) -> int:
+        """For EVERY records (ProgType=7): the recurrence interval.
+
+        Stored as a BE u16 at bytes 3-4. PC Access exposes preset
+        values like "5 SECONDS", "10 SECONDS", "1 MINUTE", etc.; the
+        unit of the integer (seconds vs minutes vs hours) is decided
+        by the controller firmware — needs more captures with varied
+        UI selections to disambiguate. The "5 SECONDS" UI default
+        encodes as ``every_interval == 5``.
+
+        Only meaningful when ``prog_type == EVERY``.
+        """
+        # Same byte-swap rationale as ``and_instance`` — bytes 3-4
+        # are BE on disk but ``cond2`` is LE-decoded.
+        return ((self.cond2 & 0xFF) << 8) | ((self.cond2 >> 8) & 0xFF)
 
     def is_empty(self) -> bool:
         """True iff the encoded record would be all-zero.
