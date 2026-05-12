@@ -185,6 +185,85 @@ and ``cond2`` would not exist.
 """
 
 
+# ---- Multi-record (firmware ≥3.0.0) AND-record companion enums ------
+#
+# When PC Access emits a block in multi-record form (one 14-byte record
+# per visual line), an AND record (ProgType=8) carries a *structured*
+# condition. The byte layout per ``clsProgram.cs:326-436`` is:
+#
+#   byte 0      : prog_type (= 8)
+#   byte 1      : OP             (enuCondOP)
+#   byte 2      : Arg1_ArgType   (enuCondArgType)
+#   bytes 3-4   : Arg1_IX        (u16; disk byte order — see note below)
+#   byte 5      : Arg1_Field     (per-type sub-field enum)
+#   byte 6      : Arg2_ArgType   (enuCondArgType)
+#   bytes 7-8   : Arg2_IX        (u16)
+#   byte 9      : Arg2_Field
+#   bytes 10-11 : CompConst      (u16; constant operand for comparison ops)
+#   bytes 12-13 : (unused)
+#
+# Special case: when OP == Arg1_Traditional (=0), the AND record's
+# condition is rendered from ``Cond`` (bytes 1-2 as u16) using the same
+# per-family scheme as compact-form ``cond`` — see
+# ``clsText.cs:2281-2284 GetComplexConditionText``. The richer
+# ``Arg1_*`` / ``Arg2_*`` / ``CompConst`` fields are only used when
+# ``OP > 0``.
+#
+# **Open: disk byte order for the three u16 fields.** ``clsProgram.Read``
+# reads u16s little-endian via ``clsPcaCryptFileStream.ReadUInt16``
+# (clsPcaCryptFileStream.cs:159-164), but the accessors index ``Data[]``
+# big-endian (``(Data[3] << 8) + Data[4]``). The single captured
+# example (``AND IF NEVER`` → all zero except byte 4 = 0x01) is
+# symmetric and doesn't disambiguate. Resolution requires a controlled
+# capture of ``AND IF ZONE 5 SECURE`` (or similar asymmetric ix value).
+# Until then we don't expose a structured ``AndRecord`` decoder — the
+# raw 14 bytes are still accessible via ``Program.raw`` for callers
+# who need them.
+
+
+class CondOP(IntEnum):
+    """``enuCondOP`` — comparison operator byte of an AND record (byte 1).
+
+    Reference: ``HAI_Shared/enuCondOP.cs``.
+    """
+
+    ARG1_TRADITIONAL = 0  # cond u16 (bytes 1-2) carries the condition
+    ARG1_EQ_ARG2 = 1
+    ARG1_NE_ARG2 = 2
+    ARG1_LT_ARG2 = 3
+    ARG1_GT_ARG2 = 4
+    ARG1_ODD = 5
+    ARG1_EVEN = 6
+    ARG1_MULTIPLE_ARG2 = 7
+    ARG1_IN_ARG2 = 8
+    ARG1_NOT_IN_ARG2 = 9
+
+
+class CondArgType(IntEnum):
+    """``enuCondArgType`` — type of an Arg1/Arg2 reference in an AND record.
+
+    The Arg1_ArgType byte (byte 2) and Arg2_ArgType byte (byte 6) take
+    these values. ``Constant=0`` means the corresponding ``Arg*_IX`` is
+    a literal integer (e.g. a temperature setpoint) rather than an
+    object reference.
+
+    Reference: ``HAI_Shared/enuCondArgType.cs``.
+    """
+
+    CONSTANT = 0
+    USER_SETTING = 1
+    ZONE = 2
+    UNIT = 3
+    THERMOSTAT = 4
+    AUXILLARY = 5  # sic (spelling matches HAI source)
+    AREA = 6
+    TIME_DATE = 7
+    AUDIO = 8
+    ACCESS_CONTROL = 9
+    MESSAGE = 10
+    SYSTEM = 11
+
+
 class ProgramCond(IntEnum):
     """Condition family byte (``enuProgramCond``).
 
