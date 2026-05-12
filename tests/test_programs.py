@@ -33,16 +33,25 @@ from omni_pca.programs import (
 
 
 def test_timed_decodes_canonical_example() -> None:
-    """The worked example from the docs page — TIMED program."""
+    """The worked example from the docs page — TIMED program.
+
+    ``cond``, ``cond2`` and ``pr2`` are **little-endian** u16 fields:
+    byte N is the low byte, byte N+1 the high byte. The byte vector
+    below comes from ``Our_House.pca`` slot 22 (a real TIMED program
+    for an HLC scene at 07:15 weekday mornings).
+    """
     body = bytes.fromhex("018d099b094403010008 0c3e070f".replace(" ", ""))
     p = Program.from_file_record(body, slot=22)
     assert p.slot == 22
     assert p.prog_type == ProgramType.TIMED
-    assert p.cond == 0x8D09
-    assert p.cond2 == 0x9B09
+    # bytes 1,2 = [8d 09] → LE u16 = 0x098D
+    assert p.cond == 0x098D
+    # bytes 3,4 = [9b 09] → LE u16 = 0x099B
+    assert p.cond2 == 0x099B
     assert p.cmd == 0x44
     assert p.par == 3
-    assert p.pr2 == 0x0100
+    # bytes 7,8 = [01 00] → LE u16 = 0x0001 (object #1)
+    assert p.pr2 == 0x0001
     assert p.month == 8
     assert p.day == 12
     assert p.days == 0x3E

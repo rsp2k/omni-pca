@@ -14,12 +14,12 @@ set, so each record is **14 bytes** with two condition slots:
 Offset      Field
 ==========  ==============================================
 0           ``prog_type``  (``ProgramType`` enum)
-1-2         ``cond``        (BE u16; opaque this pass)
-3-4         ``cond2``       (BE u16; opaque this pass)
+1-2         ``cond``        (LE u16; first AND-IF condition)
+3-4         ``cond2``       (LE u16; second AND-IF condition)
 5           ``cmd``         (``Command`` enum from
                             :mod:`omni_pca.commands`)
 6           ``par``         (byte parameter)
-7-8         ``pr2``         (BE u16, usually object#)
+7-8         ``pr2``         (LE u16, usually object#)
 9-10        ``month, day``  (or ``day, month`` in the .pca
                             on-disk layout when ProgType==Event;
                             see "Mon/Day swap" below)
@@ -27,6 +27,12 @@ Offset      Field
 12          ``hour``        (0-23)
 13          ``minute``      (0-59)
 ==========  ==============================================
+
+**Byte order:** all 16-bit fields above are **little-endian**
+(byte N is the low byte, byte N+1 is the high byte). This was
+empirically confirmed against PC Access — see findings notes
+in ``pca-re/clausal-re/FINDINGS.md``. Older versions of this
+module decoded them as BE; the LE encoding is correct.
 
 When ``prog_type == Remark`` (4), bytes 1-4 hold a 32-bit BE
 RemarkID instead of cond/cond2; the lookup table that resolves an
@@ -94,23 +100,89 @@ MAX_PROGRAMS = 1500
 class ProgramType(IntEnum):
     """Program record discriminator (``enuProgramType``).
 
-    The first five values are the actual stored types; values 5..10
-    are connector tokens used by PC Access's program-line editor to
-    string multiple records into one user-visible "line". The
-    multi-record encoding is not yet reverse-engineered.
+    The 11 values split into two encoding families. Which family a
+    block uses depends on the panel firmware version
+    (see :data:`MIN_FIRMWARE_MULTILINE_PROGRAMS`) — **older firmware
+    can only express the compact family**:
+
+    * **Compact** (``FREE`` / ``TIMED`` / ``EVENT`` / ``YEARLY`` /
+      ``REMARK``, values 0-4): always available. The whole user-visible
+      block (1 trigger + up to 2 AND conditions + 1 action) fits in one
+      14-byte record. The trigger discriminates the form; cmd/par/pr2
+      carry the inline action; cond/cond2 carry up to two AND-IF
+      conditions. PC Access calls this a "simple program".
+    * **Multi-record** (``WHEN`` / ``AT`` / ``EVERY`` / ``AND`` / ``OR``
+      / ``THEN``, values 5-10): one record per "line" in the block.
+      Used when the block would need 3+ conditions, an OR alternative,
+      or a comment block — anything the compact form can't express.
+      Requires the ``MultiLinePrograms`` capability flag on the panel,
+      which on the OmniPro II is gated to firmware ≥3.0.0
+      (clsCapOMNI_PRO_II.cs:290 — ``Features.Add(MultiLinePrograms,
+      196608u)``). On firmware <3.0 these ProgType values simply
+      cannot appear; PC Access's "Or" button and "Add Comment Block"
+      menu item are disabled.
+
+    Reference:
+        clsAutomationBlock.cs BuildLines() lines 80-131 for the
+        compact-vs-multi rendering; clsCapOMNI_PRO_II.cs:290 for the
+        firmware gate; frmAutomationEditBlock.cs:809-823
+        (``MustBeSimpleProgram()``) for the toolbar enable logic.
     """
 
     FREE = 0       # unused slot (all bytes zero)
-    TIMED = 1      # fires at a specific time of day on selected days
-    EVENT = 2      # fires when a panel event occurs (zone open, etc.)
-    YEARLY = 3     # fires on a specific calendar date each year
+    TIMED = 1      # compact: time-of-day trigger + inline action
+    EVENT = 2      # compact: panel event (zone, security, etc.) + action
+    YEARLY = 3     # compact: yearly date trigger + inline action
     REMARK = 4     # stores a 32-bit RemarkID + remark-text association
-    WHEN = 5       # connector (multi-record line, RE-pending)
-    AT = 6         # connector
-    EVERY = 7      # connector
-    AND = 8        # connector
-    OR = 9         # connector
-    THEN = 10      # connector
+    WHEN = 5       # multi-record: event-trigger record (firmware ≥3.0.0)
+    AT = 6         # multi-record: time-trigger record (firmware ≥3.0.0)
+    EVERY = 7      # multi-record: recurring-trigger record (firmware ≥3.0.0)
+    AND = 8        # multi-record: AND-condition record (firmware ≥3.0.0)
+    OR = 9         # multi-record: OR-alternative record (firmware ≥3.0.0)
+    THEN = 10      # multi-record: action record (firmware ≥3.0.0)
+
+
+def pack_firmware_version(major: int, minor: int, revision: int = 0) -> int:
+    """Pack a firmware version into HAI's 24-bit comparison form.
+
+    HAI's capability tables compare against a single u32 packed as
+    ``major * 65536 + minor * 256 + revision`` (clsHAC.FW vs the
+    second arg of ``Features.Add``). The constants in this module
+    use this same packing so callers can compare directly:
+
+    >>> pack_firmware_version(2, 16, 1)
+    135169
+    >>> pack_firmware_version(3, 0, 0)
+    196608
+    """
+    return (major & 0xFF) << 16 | (minor & 0xFF) << 8 | (revision & 0xFF)
+
+
+MIN_FIRMWARE_MULTILINE_PROGRAMS = 196608  # 3.0.0
+"""Earliest OmniPro II firmware that supports multi-record programs.
+
+Below this version, ProgType values 5-10 (``WHEN`` / ``AT`` / ``EVERY``
+/ ``AND`` / ``OR`` / ``THEN``) cannot be produced by PC Access and
+will not appear in the panel's program table. The user-visible
+limitation: any block that would need three or more AND-IF conditions,
+or any ``Or`` alternative, can't be authored. Compact-form blocks
+(values 0-4, with up to 2 inline cond/cond2 AND conditions) remain
+available.
+
+Mirrors ``Features.Add(enuFeature.MultiLinePrograms, 196608u)`` in
+clsCapOMNI_PRO_II.cs:290.
+"""
+
+MIN_FIRMWARE_DOUBLE_PROGRAM_CONDITIONAL = 0  # always
+"""Earliest firmware that supports two inline AND conditions
+(``cond`` AND ``cond2`` together) per compact program record.
+
+For the OmniPro II this is always on (no version gate in
+clsCapOMNI_PRO_II.cs:265 — ``Features.Add(DoubleProgramConditional)``
+with no version arg). The 14-byte ``PROGRAM_BYTES`` constant assumes
+this feature: on models without DPC the record would be 12 bytes
+and ``cond2`` would not exist.
+"""
 
 
 class ProgramCond(IntEnum):
@@ -381,6 +453,7 @@ def _decode_common(body: bytes) -> dict[str, object]:
 
     if prog_type == ProgramType.REMARK:
         # bytes 1-4 are a single BE u32 RemarkID instead of cond/cond2.
+        # (RemarkID is the one BE field — cond/cond2/pr2 are LE.)
         remark_id: int | None = (
             (body[1] << 24) | (body[2] << 16) | (body[3] << 8) | body[4]
         )
@@ -388,12 +461,14 @@ def _decode_common(body: bytes) -> dict[str, object]:
         cond2 = 0
     else:
         remark_id = None
-        cond = (body[1] << 8) | body[2]
-        cond2 = (body[3] << 8) | body[4]
+        # cond, cond2, pr2 are little-endian u16 — empirically confirmed
+        # by authoring known programs in PC Access and diffing bytes.
+        cond = (body[2] << 8) | body[1]
+        cond2 = (body[4] << 8) | body[3]
 
     cmd = body[5]
     par = body[6]
-    pr2 = (body[7] << 8) | body[8]
+    pr2 = (body[8] << 8) | body[7]
     days = body[11]
     hour = body[12]
     minute = body[13]
@@ -426,14 +501,15 @@ def _encode_common(p: Program) -> bytearray:
         buf[3] = (rid >> 8) & 0xFF
         buf[4] = rid & 0xFF
     else:
-        buf[1] = (p.cond >> 8) & 0xFF
-        buf[2] = p.cond & 0xFF
-        buf[3] = (p.cond2 >> 8) & 0xFF
-        buf[4] = p.cond2 & 0xFF
+        # cond, cond2, pr2 are little-endian — see _decode_common
+        buf[1] = p.cond & 0xFF
+        buf[2] = (p.cond >> 8) & 0xFF
+        buf[3] = p.cond2 & 0xFF
+        buf[4] = (p.cond2 >> 8) & 0xFF
     buf[5] = p.cmd & 0xFF
     buf[6] = p.par & 0xFF
-    buf[7] = (p.pr2 >> 8) & 0xFF
-    buf[8] = p.pr2 & 0xFF
+    buf[7] = p.pr2 & 0xFF
+    buf[8] = (p.pr2 >> 8) & 0xFF
     # 9, 10 filled by encode_{wire,file}_bytes
     buf[11] = p.days & 0xFF
     buf[12] = p.hour & 0xFF
