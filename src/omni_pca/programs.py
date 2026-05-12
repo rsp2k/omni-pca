@@ -168,6 +168,167 @@ _HR_SUNRISE_SENTINEL = 25
 _HR_SUNSET_SENTINEL = 26
 
 
+class ConditionFamily(IntEnum):
+    """Top-level discriminator for the 16-bit ``cond`` / ``cond2`` field.
+
+    Found by ``(cond >> 8) & 0xFC`` — i.e. the high byte's bits 2-7
+    (clsText.cs:2226). The four explicit families match
+    :class:`ProgramCond`; ``SEC`` is the catch-all default that
+    handles security-mode conditions (and anything else that doesn't
+    match the first four).
+    """
+
+    OTHER = 0
+    ZONE = 4
+    CTRL = 8
+    TIME = 12
+    SEC = 16
+
+
+class MiscConditional(IntEnum):
+    """Misc-conditional enum (``enuMiscConditional``) used by the
+    :attr:`ConditionFamily.OTHER` family.
+
+    Low 4 bits of ``cond`` index into this table; the high bits are zero.
+    """
+
+    NONE = 0
+    NEVER = 1
+    LIGHT = 2
+    DARK = 3
+    PHONE_DEAD = 4
+    PHONE_RINGING = 5
+    PHONE_OFF_HOOK = 6
+    PHONE_ON_HOOK = 7
+    AC_POWER_OFF = 8
+    AC_POWER_ON = 9
+    BATTERY_LOW = 10
+    BATTERY_OK = 11
+    ENERGY_COST_LOW = 12
+    ENERGY_COST_MID = 13
+    ENERGY_COST_HIGH = 14
+    ENERGY_COST_CRITICAL = 15
+
+
+@dataclass(frozen=True, slots=True)
+class Condition:
+    """One decoded program condition (``cond`` or ``cond2`` field).
+
+    Format per family (clsText.GetConditionalText, clsText.cs:2224-2273
+    and frmAutomationEditCondition.cs):
+
+    * ``OTHER`` (``cond < 0x400``): bits 0-3 = :class:`MiscConditional`
+      value (e.g. ``DARK``, ``AC_POWER_OFF``).
+    * ``ZONE`` (``cond high-byte``-bits-2-7 ``== 0x04``): bits 0-7 =
+      zone number; bit 9 = ``0`` for SECURE, ``1`` for NOT_READY.
+    * ``CTRL`` (``... == 0x08``): bits 0-8 = unit number (9 bits); bit 9
+      = ``0`` for OFF/DOWN, ``1`` for ON/UP.
+    * ``TIME`` (``... == 0x0C``): bits 0-7 = time-clock number; bit 9 =
+      ``0`` for DISABLED, ``1`` for ENABLED.
+    * ``SEC`` (any other value, including ``... == 0x10``): bits 8-11 =
+      area number; bits 12-14 = :class:`SecurityMode` value; bit 15 =
+      "arming-transition" flag (or "Lumina setting" on Lumina firmware).
+
+    A ``cond`` of ``0`` is the "no condition" sentinel — the program
+    always fires regardless of state.
+    """
+
+    raw: int
+    family: ConditionFamily
+    selector: int            # zone# / unit# / clock# / area# / misc-id
+    operand: int             # 0/1 for Zone/Ctrl/Time; mode value for Sec
+    arming_transition: bool  # only meaningful for SEC family
+
+    @classmethod
+    def decode(cls, cond: int) -> Condition:
+        """Decode a 16-bit ``cond`` value into its semantic parts."""
+        if not 0 <= cond <= 0xFFFF:
+            raise ValueError(f"cond out of u16 range: {cond}")
+        fam_byte = (cond >> 8) & 0xFC
+        if fam_byte == ConditionFamily.OTHER:
+            return cls(
+                raw=cond,
+                family=ConditionFamily.OTHER,
+                selector=cond & 0x0F,
+                operand=0,
+                arming_transition=False,
+            )
+        if fam_byte == ConditionFamily.ZONE:
+            return cls(
+                raw=cond,
+                family=ConditionFamily.ZONE,
+                selector=cond & 0xFF,
+                operand=(cond >> 9) & 1,
+                arming_transition=False,
+            )
+        if fam_byte == ConditionFamily.CTRL:
+            return cls(
+                raw=cond,
+                family=ConditionFamily.CTRL,
+                selector=cond & 0x1FF,
+                operand=(cond >> 9) & 1,
+                arming_transition=False,
+            )
+        if fam_byte == ConditionFamily.TIME:
+            return cls(
+                raw=cond,
+                family=ConditionFamily.TIME,
+                selector=cond & 0xFF,
+                operand=(cond >> 9) & 1,
+                arming_transition=False,
+            )
+        # Default: SEC. Bit 15 is "arming" flag iff bits 12-14 (mode) are
+        # non-zero -- otherwise it's just the mode-Off encoding marker.
+        mode = (cond >> 12) & 0x7
+        bit15 = (cond >> 15) & 1
+        return cls(
+            raw=cond,
+            family=ConditionFamily.SEC,
+            selector=(cond >> 8) & 0x0F,
+            operand=mode,
+            arming_transition=bool(bit15 and mode != 0),
+        )
+
+    def is_empty(self) -> bool:
+        """``True`` when the condition field is zero — no condition applies."""
+        return self.raw == 0
+
+    def describe(self) -> str:
+        """Human-readable description without name lookups.
+
+        Renders objects by index (``"Zone 5"``, ``"Unit 12"``) since
+        this dataclass doesn't carry the panel name tables. For
+        installation-name resolution use :func:`format_condition`
+        below with a name dict.
+        """
+        if self.is_empty():
+            return "(no condition)"
+        if self.family is ConditionFamily.OTHER:
+            try:
+                return MiscConditional(self.selector).name
+            except ValueError:
+                return f"OTHER({self.selector})"
+        if self.family is ConditionFamily.ZONE:
+            verb = "NOT_READY" if self.operand else "SECURE"
+            return f"Zone {self.selector} {verb}"
+        if self.family is ConditionFamily.CTRL:
+            verb = "ON" if self.operand else "OFF"
+            return f"Unit {self.selector} {verb}"
+        if self.family is ConditionFamily.TIME:
+            verb = "ENABLED" if self.operand else "DISABLED"
+            return f"Time clock {self.selector} {verb}"
+        # SEC
+        from .models import SecurityMode  # local import to keep top circular-free
+        try:
+            mode_name = SecurityMode(self.operand).name
+        except ValueError:
+            mode_name = f"MODE({self.operand})"
+        area = f"Area {self.selector}" if self.selector else "(any area)"
+        if self.arming_transition:
+            return f"{area} ARMING {mode_name}"
+        return f"{area} {mode_name}"
+
+
 def _classify_time(hour: int, minute: int) -> tuple[TimeKind, int]:
     """Decode ``(hour, minute)`` bytes into a ``(kind, value)`` pair.
 
@@ -423,6 +584,19 @@ class Program:
                 return "at sunset"
             return f"{abs(value)} min {'after' if value > 0 else 'before'} sunset"
         return f"{self.hour:02d}:{self.minute:02d}"
+
+    def condition(self) -> Condition:
+        """Decode the primary ``cond`` field into a :class:`Condition`."""
+        return Condition.decode(self.cond)
+
+    def condition2(self) -> Condition:
+        """Decode the secondary ``cond2`` field (DPC programs only).
+
+        Returns a ``Condition`` with ``family == OTHER`` and
+        ``selector == 0`` (i.e. ``is_empty()``) when ``cond2 == 0``,
+        which is the common "no second condition" case.
+        """
+        return Condition.decode(self.cond2)
 
     @property
     def event_id(self) -> int:

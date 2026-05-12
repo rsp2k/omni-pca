@@ -297,3 +297,114 @@ def test_time_kind_round_trip_through_wire() -> None:
     assert p2.time_kind == TimeKind.SUNSET
     assert p2.time_offset_minutes == -10
     assert p2.format_time() == "10 min before sunset"
+
+
+# ---- Condition bit-split decoder -----------------------------------------
+
+
+from omni_pca.programs import (  # noqa: E402
+    Condition,
+    ConditionFamily,
+    MiscConditional,
+)
+
+
+def test_condition_empty() -> None:
+    """cond == 0 → no condition applies."""
+    c = Condition.decode(0)
+    assert c.is_empty()
+    assert c.family is ConditionFamily.OTHER
+    assert c.describe() == "(no condition)"
+
+
+@pytest.mark.parametrize(
+    "cond, family, selector, operand, expected_describe",
+    [
+        # OTHER family — bits 0-3 = MiscConditional value
+        (0x0000, ConditionFamily.OTHER, 0,  0, "(no condition)"),
+        (0x0002, ConditionFamily.OTHER, 2,  0, "LIGHT"),
+        (0x0003, ConditionFamily.OTHER, 3,  0, "DARK"),
+        (0x0008, ConditionFamily.OTHER, 8,  0, "AC_POWER_OFF"),
+        (0x000B, ConditionFamily.OTHER, 11, 0, "BATTERY_OK"),
+        (0x010B, ConditionFamily.OTHER, 11, 0, "BATTERY_OK"),  # high bits ignored
+        # ZONE family — bits 0-7 = zone, bit 9 = NOT_READY (1) / SECURE (0)
+        (0x0405, ConditionFamily.ZONE, 5,  0, "Zone 5 SECURE"),
+        (0x0605, ConditionFamily.ZONE, 5,  1, "Zone 5 NOT_READY"),
+        (0x040B, ConditionFamily.ZONE, 11, 0, "Zone 11 SECURE"),
+        # CTRL family — bits 0-8 = unit, bit 9 = ON (1) / OFF (0)
+        (0x0801, ConditionFamily.CTRL, 1,    0, "Unit 1 OFF"),
+        (0x0A01, ConditionFamily.CTRL, 1,    1, "Unit 1 ON"),
+        (0x09FF, ConditionFamily.CTRL, 0x1FF, 0, "Unit 511 OFF"),  # 9-bit unit
+        # TIME family — bits 0-7 = clock, bit 9 = ENABLED (1) / DISABLED (0)
+        (0x0C04, ConditionFamily.TIME, 4, 0, "Time clock 4 DISABLED"),
+        (0x0E03, ConditionFamily.TIME, 3, 1, "Time clock 3 ENABLED"),
+        # SEC family — bits 8-11 = area, bits 12-14 = mode, bit 15 = arming flag
+        # mode=Off (0) with bit 15: encode of "area X is in mode Off"
+        (0x8100, ConditionFamily.SEC, 1, 0, "Area 1 OFF"),
+        (0x8800, ConditionFamily.SEC, 8, 0, "Area 8 OFF"),
+        # mode=Day (1), no exit-delay flag → not arming-transition
+        (0x1100, ConditionFamily.SEC, 1, 1, "Area 1 DAY"),
+        # mode=Away (3), bit 15 set → ARMING (in transition)
+        (0xB100, ConditionFamily.SEC, 1, 3, "Area 1 ARMING AWAY"),
+        # area=0 selector → "(any area)"
+        (0x9000, ConditionFamily.SEC, 0, 1, "(any area) ARMING DAY"),
+    ],
+)
+def test_condition_decode_per_family(
+    cond, family, selector, operand, expected_describe
+) -> None:
+    c = Condition.decode(cond)
+    assert c.family == family, (
+        f"cond={cond:#06x} family expected {family.name}, got {c.family.name}"
+    )
+    assert c.selector == selector, f"cond={cond:#06x} selector"
+    assert c.operand == operand, f"cond={cond:#06x} operand"
+    assert c.describe() == expected_describe
+
+
+def test_condition_arming_transition_flag_only_when_mode_nonzero() -> None:
+    """Bit 15 + mode=Off is the 'plain off' encoding, NOT an arming transition.
+
+    Per clsText.cs:2263, the arming-transition branch requires
+    ``(cond & 0xF000) != 0x8000``, which fails when only bit 15 is set
+    (mode bits 12-14 are zero).
+    """
+    plain_off = Condition.decode(0x8100)
+    assert plain_off.arming_transition is False
+    assert plain_off.describe() == "Area 1 OFF"
+
+    arming = Condition.decode(0xB100)  # bit 15 + mode=3 (AWAY)
+    assert arming.arming_transition is True
+    assert "ARMING" in arming.describe()
+
+
+def test_program_condition_helpers() -> None:
+    """Program.condition() / condition2() decode the raw u16 fields."""
+    p = Program(
+        prog_type=int(ProgramType.TIMED),
+        cond=0x0605,    # Zone 5 NOT_READY
+        cond2=0xB100,   # Area 1 ARMING AWAY
+    )
+    c1 = p.condition()
+    c2 = p.condition2()
+    assert c1.family is ConditionFamily.ZONE
+    assert c1.selector == 5
+    assert c1.describe() == "Zone 5 NOT_READY"
+    assert c2.family is ConditionFamily.SEC
+    assert c2.describe() == "Area 1 ARMING AWAY"
+
+
+def test_condition_rejects_out_of_u16_range() -> None:
+    with pytest.raises(ValueError):
+        Condition.decode(-1)
+    with pytest.raises(ValueError):
+        Condition.decode(0x10000)
+
+
+def test_misc_conditional_enum_matches_csharp() -> None:
+    """enuMiscConditional values mirrored from clsText.cs."""
+    assert MiscConditional.NONE == 0
+    assert MiscConditional.DARK == 3
+    assert MiscConditional.AC_POWER_OFF == 8
+    assert MiscConditional.BATTERY_OK == 11
+    assert MiscConditional.ENERGY_COST_CRITICAL == 15

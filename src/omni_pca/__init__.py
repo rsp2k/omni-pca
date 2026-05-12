@@ -3,7 +3,10 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .programs import (
+    Condition,
+    ConditionFamily,
     Days,
+    MiscConditional,
     Program,
     ProgramCond,
     ProgramType,
@@ -18,7 +21,10 @@ except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 __all__ = [
+    "Condition",
+    "ConditionFamily",
     "Days",
+    "MiscConditional",
     "Program",
     "ProgramCond",
     "ProgramType",
