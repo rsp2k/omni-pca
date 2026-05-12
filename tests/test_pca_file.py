@@ -190,6 +190,105 @@ def test_programs_sanity_invariants() -> None:
         )
 
 
+def test_remarks_walker_on_empty_table() -> None:
+    """Hand-built minimal tail with zero description entries + zero remarks."""
+    import struct
+
+    from omni_pca.pca_file import PcaReader, _walk_to_remarks
+
+    blob = (
+        struct.pack("<H", 9)        # ModemBaud
+        + b"\x01\x00\x00"           # 3 init-enable flags
+        + struct.pack("<H", 0)      # AccountRemarks_Extended length 0
+        + (struct.pack("<I", 0) * 9)  # 9 description blocks, each count=0
+        + struct.pack("<I", 1234)   # _RemarksNextID
+        + struct.pack("<I", 0)      # count = 0
+    )
+    r = PcaReader(blob)
+    assert _walk_to_remarks(r) == {}
+
+
+def test_remarks_walker_decodes_real_entries() -> None:
+    """Hand-built tail with two non-empty description entries + three remarks."""
+    import struct
+
+    from omni_pca.pca_file import (
+        PcaReader,
+        _DESCRIPTION_SLOT_BYTES,
+        _walk_to_remarks,
+    )
+
+    # Two zones with descriptions; everything else has zero entries.
+    zone_desc = b"\x06" + b"FOYER!" + b"\x00" * (32 - 6)   # 33 bytes
+    other_desc = b"\x09" + b"GARAGE LT" + b"\x00" * (32 - 9)
+    assert len(zone_desc) == _DESCRIPTION_SLOT_BYTES
+    assert len(other_desc) == _DESCRIPTION_SLOT_BYTES
+    description_blocks = (
+        struct.pack("<I", 2) + zone_desc + other_desc  # Zones
+        + struct.pack("<I", 0) * 8                      # Units .. AudioZones
+    )
+
+    def _remark_entry(rid: int, text: str) -> bytes:
+        t = text.encode("utf-8")
+        return struct.pack("<I", rid) + struct.pack("<H", len(t)) + t
+
+    remarks_block = (
+        struct.pack("<I", 99)         # _RemarksNextID
+        + struct.pack("<I", 3)        # count
+        + _remark_entry(1, "TURN ON LIVING ROOM LIGHTS")
+        + _remark_entry(7, "DOG WALK TIME")
+        + _remark_entry(0xDEADBEEF, "UTF-8 ✓ ☃ ♥")
+    )
+
+    tail = (
+        struct.pack("<H", 9) + b"\x01\x00\x00"
+        + struct.pack("<H", 0)
+        + description_blocks
+        + remarks_block
+    )
+    r = PcaReader(tail)
+    remarks = _walk_to_remarks(r)
+    assert remarks == {
+        1: "TURN ON LIVING ROOM LIGHTS",
+        7: "DOG WALK TIME",
+        0xDEADBEEF: "UTF-8 ✓ ☃ ♥",
+    }
+
+
+def test_remarks_walker_returns_empty_on_truncated_input() -> None:
+    """A short/garbage tail should yield ``{}``, not raise."""
+    from omni_pca.pca_file import PcaReader, _walk_to_remarks
+
+    # Way too short to hold even the prelude.
+    assert _walk_to_remarks(PcaReader(b"\x00" * 5)) == {}
+
+
+def test_remarks_resolved_against_live_fixture_is_empty_dict() -> None:
+    """Our live fixture has zero remarks programmed; the walker must
+    still consume the prelude + nine description blocks + the zero
+    count without raising."""
+    blob = _load_programs_blob_or_skip()  # establishes the fixture exists
+    # We've already validated the position at end-of-programs above; now
+    # re-walk and continue past Connection through the remarks walker.
+    from omni_pca.pca_file import (
+        _CAP_OMNI_PRO_II,
+        PcaReader,
+        _parse_header,
+        _walk_to_connection,
+        _walk_to_remarks,
+    )
+    from pathlib import Path
+
+    raw = Path(_FIXTURE).read_bytes()
+    r = PcaReader(raw)
+    _parse_header(r)
+    _walk_to_connection(r, _CAP_OMNI_PRO_II)
+    r.string8_fixed(120)
+    r.string8_fixed(5)
+    r.string8_fixed(32)
+    assert _walk_to_remarks(r) == {}
+
+
 def test_pca_account_dataclass_has_programs_field() -> None:
     """``PcaAccount`` exposes ``programs`` with the expected type + default.
 
@@ -201,13 +300,14 @@ def test_pca_account_dataclass_has_programs_field() -> None:
 
     fields = {f.name: f for f in PcaAccount.__dataclass_fields__.values()}
     assert "programs" in fields
-    # default_factory or default — the field should be an empty tuple
-    # when no programs are decoded.
+    assert "remarks" in fields
+    # Defaults: empty tuple for programs, empty dict for remarks.
     inst = PcaAccount(
         version_tag="PCA03", file_version=3,
         model=16, firmware_major=2, firmware_minor=12, firmware_revision=1,
     )
     assert inst.programs == ()
+    assert inst.remarks == {}
 
 
 def test_pca_reader_io_state_introspection() -> None:

@@ -203,6 +203,17 @@ class PcaAccount:
     :func:`omni_pca.programs.iter_defined` to filter to in-use slots.
     """
 
+    remarks: dict[int, str] = field(default_factory=dict)
+    """Resolved RemarkID → text for every Remark-typed program.
+
+    A Remark-typed program record (``ProgramType.REMARK``, byte 0 == 4)
+    stores a 32-bit BE RemarkID in bytes 1-4 of its 14-byte body; the
+    associated user-entered text lives in a separate table further down
+    the .pca body (after Connection + ModemBaud flags + nine 33-byte
+    Description blocks). The walker parses that table on a best-effort
+    basis — failure here doesn't break Connection extraction.
+    """
+
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
     """Decrypt ``data`` (raw PCA01.CFG bytes) and parse per clsPcaCfg.Read()."""
@@ -277,6 +288,61 @@ def _parse_header(r: PcaReader) -> tuple[str, int, int, int, int, int, str, str,
     fw_minor = r.u8()
     fw_rev = struct.unpack("<b", r.bytes_(1))[0]
     return version_tag, file_version, model, fw_major, fw_minor, fw_rev, name, address, phone, code, remarks
+
+
+# Description blocks each store a 32-byte fixed slot prefixed by a
+# 1-byte length (clsAbstractNamedItem.ReadDescription:1-4) so each
+# entry is exactly _DESCRIPTION_SLOT_BYTES on the wire regardless of
+# the actual string length.
+_DESCRIPTION_SLOT_BYTES: Final[int] = 1 + 32
+
+
+def _walk_to_remarks(r: PcaReader) -> dict[int, str]:
+    """Pick up just-past Connection and walk through the description
+    blocks, then read and return the Remarks dict.
+
+    Layout for PCA03 (FileVersion 3, per clsHAC.cs:8055-8079):
+
+    1. ``ModemBaud`` (u16 LE), 3× bool (1 byte each), AccountRemarks_Extended
+       (String16: u16 length + bytes).
+    2. Nine Description blocks, one per object family — Zones, Units,
+       Buttons, Codes, Thermostats, Areas, Messages, AudioSources,
+       AudioZones. Each is ``[u32 count] + count * 33 bytes`` (per
+       :data:`_DESCRIPTION_SLOT_BYTES`); the contents are per-object
+       free-text descriptions we don't currently surface.
+    3. Remarks table:
+           - ``_RemarksNextID`` (u32 LE) — what ``RemarksNextID()`` will
+             hand out next.
+           - ``count`` (u32 LE).
+           - ``count`` entries of ``[u32 LE remark_id][String16 text]``.
+
+    Returns ``{}`` on any read failure (panels without remarks, or a
+    file format we don't recognise, just produce an empty dict —
+    callers shouldn't need to special-case that).
+
+    Reference: clsPrograms.ReadRemarks (clsPrograms.cs:148-168),
+    clsAbstractNamedItem.ReadDescription, clsHAC.cs:8055-8079.
+    """
+    try:
+        r.u16()                  # ModemBaud
+        r.u8(); r.u8(); r.u8()   # PCModemInit1/2/3 enable flags
+        r.string16()             # AccountRemarks_Extended (variable)
+        # Nine description blocks.
+        for _ in range(9):
+            count = r.u32()
+            if count > 0:
+                r.bytes_(count * _DESCRIPTION_SLOT_BYTES)
+        # Remarks table.
+        r.u32()                  # _RemarksNextID
+        remark_count = r.u32()
+        out: dict[int, str] = {}
+        for _ in range(remark_count):
+            rid = r.u32()
+            text = r.string16()
+            out[rid] = text
+        return out
+    except (EOFError, ValueError, struct.error):
+        return {}
 
 
 def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> bytes:
@@ -398,4 +464,12 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.network_port = network_port
     account.controller_key = controller_key
     account.programs = programs
+
+    # PCA03+ continues past Connection with ModemBaud flags + nine
+    # Description blocks + the Remarks table. We walk it on a
+    # best-effort basis — a failure here leaves account.remarks={}
+    # without affecting the Connection fields above.
+    if file_version >= 3:
+        account.remarks = _walk_to_remarks(r)
+
     return account
