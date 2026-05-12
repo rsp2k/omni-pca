@@ -209,16 +209,26 @@ and ``cond2`` would not exist.
 # ``Arg1_*`` / ``Arg2_*`` / ``CompConst`` fields are only used when
 # ``OP > 0``.
 #
-# **Open: disk byte order for the three u16 fields.** ``clsProgram.Read``
-# reads u16s little-endian via ``clsPcaCryptFileStream.ReadUInt16``
-# (clsPcaCryptFileStream.cs:159-164), but the accessors index ``Data[]``
-# big-endian (``(Data[3] << 8) + Data[4]``). The single captured
-# example (``AND IF NEVER`` → all zero except byte 4 = 0x01) is
-# symmetric and doesn't disambiguate. Resolution requires a controlled
-# capture of ``AND IF ZONE 5 SECURE`` (or similar asymmetric ix value).
-# Until then we don't expose a structured ``AndRecord`` decoder — the
-# raw 14 bytes are still accessible via ``Program.raw`` for callers
-# who need them.
+# **Disk byte order for the three u16 fields: big-endian.** Verified
+# empirically by authoring ``AND IF ZONE 5 SECURE`` and observing the
+# zone number (5) at byte 4, not byte 3. So ``Arg1_IX``, ``Arg2_IX``,
+# and ``CompConst`` are decoded as ``(body[N] << 8) | body[N+1]`` —
+# the *opposite* of compact-form ``cond`` / ``cond2`` / ``pr2``, which
+# are LE. Different record families use different byte orders.
+#
+# Still open: byte 1's semantic role. The C# accessor says it's ``OP``
+# (`enuCondOP`), but empirically `0x04` in byte 1 corresponds to the
+# ZONE family code (matching ``ProgramCond.ZONE``) rather than
+# ``Arg1_GT_Arg2`` (which the C# enum would assign). Most likely byte
+# 1 carries the family code when ``OP`` is implicitly Traditional
+# (the common case), and only takes structured ``OP`` values when the
+# user picks a comparison operator. A future capture of ``AND IF
+# TEMPERATURE > 70`` would resolve this.
+#
+# We don't expose a structured ``AndRecord`` decoder yet — the raw 14
+# bytes are still accessible via ``Program.raw`` for callers who
+# need them, and the two open questions on the structured form make
+# a partial decoder risk shipping wrong field interpretations.
 
 
 class CondOP(IntEnum):
