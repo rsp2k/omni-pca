@@ -568,3 +568,51 @@ def test_then_record_uses_compact_action_layout() -> None:
     assert p.cmd == 1  # enuUnitCommand.On
     assert p.par == 0
     assert p.pr2 == 1  # UNIT 1 (LE u16 at bytes 7-8, same as compact)
+
+
+# ---- structured AND records (firmware ≥3.0, OP > 0) ------------------
+
+
+def test_and_structured_date_eq_1231() -> None:
+    """Structured AND IF DATE IS EQUAL TO 12/31 (block 12 slot 13).
+
+    Captured bytes: 08 07 01 00 00 01 00 1f 0c 00 00 00 00 00
+
+    Decodes per clsProgram.cs:326-436 accessors after Read's LE-to-BE
+    byte swap. The OP is non-zero (Arg1_EQ_Arg2), so this is the
+    "structured" case where Arg1_ArgType holds an actual enuCondArgType
+    value (TimeDate=7) rather than a compact-form family code.
+    """
+    body = bytes.fromhex("08 07 01 00 00 01 00 1f 0c 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=13)
+    assert p.prog_type == ProgramType.AND
+    assert p.and_op == 1  # enuCondOP.Arg1_EQ_Arg2
+    assert p.and_arg1_argtype == 7  # enuCondArgType.TimeDate
+    assert p.and_instance == 0  # Arg1_IX = 0 (CURRENT_DATE)
+    assert p.and_arg1_field == 1  # Date sub-field
+    assert p.and_arg2_argtype == 0  # enuCondArgType.Constant
+    # Arg2_IX = (month << 8) | day = (12 << 8) | 31 = 0x0c1f
+    assert p.and_arg2_ix == 0x0C1F
+    assert p.and_arg2_ix >> 8 == 12  # month
+    assert p.and_arg2_ix & 0xFF == 31  # day
+    assert p.and_arg2_field == 0
+    assert p.and_compconst == 0
+
+
+def test_and_traditional_zone_5_secure_via_structured_view() -> None:
+    """Traditional AND (OP=0) read via the structured-AND accessors.
+
+    For the Traditional case, Arg1_ArgType holds the compact-form
+    family code (ZONE=4) — NOT the enuCondArgType Zone=2. This is the
+    "dual-use byte" behavior documented at clsConditionLine.cs:17-33.
+    """
+    # AND IF ZONE 5 SECURE — same byte vector as earlier and_zone_5_secure test
+    body = bytes.fromhex("08 04 00 00 05 00 00 00 00 00 00 00 00 00".replace(" ", ""))
+    p = Program.from_file_record(body, slot=7)
+    assert p.and_op == 0  # Arg1_Traditional
+    # Arg1_ArgType holds the ProgramCond family code (ZONE=4), not enuCondArgType.Zone=2
+    assert p.and_arg1_argtype == 4
+    # and_family is the same byte for this case
+    assert p.and_family == p.and_arg1_argtype
+    # The instance number is still in bytes 3-4 BE
+    assert p.and_instance == 5

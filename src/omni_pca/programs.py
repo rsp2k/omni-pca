@@ -816,36 +816,159 @@ class Program:
     def and_instance(self) -> int:
         """For AND records (ProgType=8): the object/instance number.
 
-        Stored as a BE u16 at bytes 3-4 of the AND record. Returns:
-        zone # for ZONE family, unit # for CTRL family,
-        ``MiscConditional`` value for OTHER family, etc.
+        Returns the semantic instance for both Traditional and
+        Structured AND records. The encoding differs internally:
 
-        Empirical evidence: ``AND IF ZONE 5 SECURE`` → 5,
-        ``AND IF UNIT 1 ON`` → 1, ``AND IF NEVER`` → 1
-        (MiscConditional.NEVER).
+        * **Traditional (OP=0):** ``clsConditionLine.Cond`` setter
+          stores ``Arg1.IX = (instance & 0xFF) << 8`` so the instance
+          ends up in the HIGH byte of the u16. Empirically:
+          ``AND IF ZONE 5 SECURE`` → cond2 = ``0x0500``, instance = 5.
+        * **Structured (OP > 0):** ``Arg1_IX`` is the raw u16, so
+          the instance is the whole value. ``AND IF ZONE 5 IS
+          BYPASSED`` (hypothetical) → cond2 = 5.
 
+        Per :attr:`and_arg1_ix` for the raw value.
         Only meaningful when ``prog_type == AND``.
         """
-        # Disk bytes 3-4 = BE u16, but ``cond2`` was LE-decoded.
-        # The BE-interpreted value is the byte-swap of ``cond2``.
-        return ((self.cond2 & 0xFF) << 8) | ((self.cond2 >> 8) & 0xFF)
+        if self.and_op == 0:
+            # Traditional: instance is in the high byte of Arg1_IX
+            return (self.cond2 >> 8) & 0xFF
+        # Structured: Arg1_IX is the instance directly
+        return self.cond2
+
+    @property
+    def and_arg1_ix(self) -> int:
+        """For AND records: the raw ``Arg1_IX`` u16 value (bytes 3-4).
+
+        Equals ``self.cond2`` since the Python LE decode of disk bytes
+        3-4 produces the same value as the C# in-memory BE ``Arg1_IX``
+        (the Read function's LE-to-BE byte swap cancels out at this
+        level). Returns:
+
+        * **Traditional (OP=0):** ``(instance & 0xFF) << 8`` — the
+          instance number shifted up by 8 bits (see
+          :attr:`and_instance` for the unshifted value).
+        * **Structured (OP > 0):** the raw instance number / index.
+        """
+        return self.cond2
 
     @property
     def every_interval(self) -> int:
         """For EVERY records (ProgType=7): the recurrence interval.
 
-        Stored as a BE u16 at bytes 3-4. PC Access exposes preset
-        values like "5 SECONDS", "10 SECONDS", "1 MINUTE", etc.; the
-        unit of the integer (seconds vs minutes vs hours) is decided
-        by the controller firmware — needs more captures with varied
-        UI selections to disambiguate. The "5 SECONDS" UI default
-        encodes as ``every_interval == 5``.
+        Per the C# ``clsProgram.Interval`` accessor at
+        ``clsProgram.cs:338-348``, Interval = ``(Data[2] << 8) | Data[3]``
+        — i.e. it spans the Cond and Cond2 byte ranges. After Read's
+        LE-to-BE swap, ``Data[2] = cond & 0xFF`` and
+        ``Data[3] = (cond2 >> 8) & 0xFF``, so:
+
+            Interval = ((cond & 0xFF) << 8) | ((cond2 >> 8) & 0xFF)
+
+        PC Access exposes preset values like "5 SECONDS", "10 SECONDS",
+        "1 MINUTE", etc.; the unit (seconds vs minutes vs hours) is
+        decided by the controller firmware — needs more captures with
+        varied UI selections to disambiguate. The "5 SECONDS" UI
+        default encodes as ``every_interval == 5``.
 
         Only meaningful when ``prog_type == EVERY``.
         """
-        # Same byte-swap rationale as ``and_instance`` — bytes 3-4
-        # are BE on disk but ``cond2`` is LE-decoded.
-        return ((self.cond2 & 0xFF) << 8) | ((self.cond2 >> 8) & 0xFF)
+        return ((self.cond & 0xFF) << 8) | ((self.cond2 >> 8) & 0xFF)
+
+    # ---- structured AND records (firmware ≥3.0, OP > 0) ----
+
+    @property
+    def and_op(self) -> int:
+        """For AND records (ProgType=8): the operator byte (`enuCondOP`).
+
+        Returns 0 (``Arg1_Traditional``) for the common case where the
+        condition uses the compact-form ``cond``-style encoding (see
+        :attr:`and_family` and :attr:`and_instance`). For structured
+        comparisons (e.g. ``DATE IS EQUAL TO 12/31``,
+        ``TEMPERATURE > 70``) returns ``1`` through ``9`` per
+        :class:`CondOP`.
+
+        Per ``clsProgram.cs:326``, ``OP`` lives at ``Data[1]`` (= high
+        byte of the LE-decoded ``cond`` field, because the Cond setter
+        writes ``Data[1] = value >> 8``).
+        """
+        return (self.cond >> 8) & 0xFF
+
+    @property
+    def and_arg1_argtype(self) -> int:
+        """For AND records: the ``Arg1_ArgType`` byte.
+
+        Holds different semantics depending on :attr:`and_op`:
+
+        * **OP == 0 (Traditional):** the compact-form ``ProgramCond``
+          family code (ZONE=4, CTRL=8, TIME=12, SEC=16), *not* the
+          :class:`CondArgType` Zone=2/Unit=3 etc. The byte is reused
+          as a raw byte holder. This is the same value as
+          :attr:`and_family` for the simple-AND case.
+
+        * **OP > 0 (Structured):** an actual :class:`CondArgType`
+          value (Zone=2, Unit=3, Thermostat=4, TimeDate=7, …).
+
+        Per ``clsProgram.cs:351``, ``Arg1_ArgType`` lives at
+        ``Data[2]`` (= low byte of the LE-decoded ``cond`` field).
+        """
+        return self.cond & 0xFF
+
+    @property
+    def and_arg2_argtype(self) -> int:
+        """For AND records: the ``Arg2_ArgType`` byte (byte 6 on disk).
+
+        Holds a :class:`CondArgType` value when ``OP > 0``. ``0`` =
+        ``Constant`` is the common case for comparisons against a
+        literal value (then :attr:`and_arg2_ix` is the constant).
+
+        Reuses the ``par`` byte slot (which serves the cmd-parameter
+        role for compact-form records).
+        """
+        return self.par
+
+    @property
+    def and_arg2_ix(self) -> int:
+        """For AND records: ``Arg2_IX`` u16 (bytes 7-8 on disk).
+
+        Equals ``self.pr2`` — Python LE decode of disk bytes 7-8
+        gives the same value as the C# in-memory BE ``Arg2_IX``
+        accessor, because the encoder writes via the same
+        ``WriteUInt16(Pr2)`` path the compact form uses.
+
+        For structured comparisons, holds either an object index (if
+        ``and_arg2_argtype != Constant``) or the constant operand
+        value packed for the specific Arg1 type. Example: for
+        ``DATE IS EQUAL TO 12/31`` the Arg2_IX is ``(12 << 8) | 31 =
+        0x0c1f = 3103`` — month in the high byte, day in the low byte.
+        """
+        return self.pr2
+
+    @property
+    def and_arg1_field(self) -> int:
+        """For AND records: ``Arg1_Field`` byte (byte 5 on disk).
+
+        Per-type sub-field index (e.g. ``enuZoneField.CurrentState``
+        for Zone arguments). Reuses the ``cmd`` byte slot.
+        """
+        return self.cmd
+
+    @property
+    def and_arg2_field(self) -> int:
+        """For AND records: ``Arg2_Field`` byte (byte 9 on disk).
+
+        Reuses the ``month`` byte slot.
+        """
+        return self.month
+
+    @property
+    def and_compconst(self) -> int:
+        """For AND records: ``CompConst`` BE u16 (bytes 10-11 on disk).
+
+        Constant operand for comparison ops that need a literal value
+        beyond ``Arg2_IX``. Zero for the captures we have so far.
+        Reuses the (``day``, ``days``) byte pair.
+        """
+        return ((self.day & 0xFF) << 8) | (self.days & 0xFF)
 
     def is_empty(self) -> bool:
         """True iff the encoded record would be all-zero.
