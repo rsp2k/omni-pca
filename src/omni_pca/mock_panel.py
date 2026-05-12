@@ -231,6 +231,12 @@ class MockState:
     # matched code_index in the area's last_user field on success.
     user_codes: dict[int, int] = field(default_factory=dict)
 
+    # Program table — slot number (1-based) → raw 14-byte wire body.
+    # Wire layout (no Mon/Day swap) so a v2 ``ProgramData`` reply is a
+    # direct copy. Slots not present in this dict respond with 14 zero
+    # bytes, matching real-panel "unused slot" behavior.
+    programs: dict[int, bytes] = field(default_factory=dict)
+
     # SystemStatus snapshot. Defaults: time set, battery good, no alarms.
     time_set: bool = True
     year: int = 26  # 2026
@@ -698,7 +704,30 @@ class MockPanel:
             return self._reply_extended_status(payload), ()
         if opcode == OmniLink2MessageType.AcknowledgeAlerts:
             return _build_ack(), ()
+        if opcode == OmniLink2MessageType.UploadProgram:
+            return self._reply_program_data(payload), ()
         return _build_nak(opcode), ()
+
+    def _reply_program_data(self, payload: bytes) -> Message:
+        """Single-shot v2 program read.
+
+        Request payload: ``[number_hi, number_lo, request_reason]`` (3 bytes
+        per ``clsOL2MsgUploadProgram``). Reply payload: ``[number_hi,
+        number_lo] + raw_14_byte_body`` per ``clsOL2MsgProgramData``.
+
+        If the slot is missing from ``state.programs`` we serve 14 zero
+        bytes — same as a real panel reporting an empty slot.
+        """
+        if len(payload) < 2:
+            return _build_nak(OmniLink2MessageType.UploadProgram)
+        number = (payload[0] << 8) | payload[1]
+        body = self.state.programs.get(number, b"\x00" * 14)
+        if len(body) != 14:
+            return _build_nak(OmniLink2MessageType.UploadProgram)
+        return encode_v2(
+            OmniLink2MessageType.ProgramData,
+            bytes([(number >> 8) & 0xFF, number & 0xFF]) + body,
+        )
 
     # -------- reply builders (byte-exact per clsOL2Msg*.cs) --------
 

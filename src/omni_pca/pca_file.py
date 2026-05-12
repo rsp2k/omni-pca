@@ -39,9 +39,19 @@ from __future__ import annotations
 import io
 import os
 import struct
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
+
+from .programs import (
+    MAX_PROGRAMS,
+    PROGRAM_BYTES,
+    Program,
+    decode_program_table,
+)
+
+_log = logging.getLogger(__name__)
 
 KEY_PC01: Final[int] = 0x14326573  # 338847091 — clsPcaCfg.keyPC01 (PCA01.CFG)
 KEY_EXPORT: Final[int] = 0x17569237  # 391549495 — clsPcaCfg.keyExport (.pca import/export)
@@ -185,6 +195,13 @@ class PcaAccount:
     account_phone: str = field(default="", repr=False)
     account_code: str = field(default="", repr=False)
     account_remarks: str = field(default="", repr=False)
+    programs: tuple[Program, ...] = ()
+    """Decoded panel automation programs (1500 slots; many usually empty).
+
+    Populated only when the .pca body is walked successfully and the
+    Programs block decodes without error. Empty tuple otherwise. Use
+    :func:`omni_pca.programs.iter_defined` to filter to in-use slots.
+    """
 
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
@@ -262,9 +279,11 @@ def _parse_header(r: PcaReader) -> tuple[str, int, int, int, int, int, str, str,
     return version_tag, file_version, model, fw_major, fw_minor, fw_rev, name, address, phone, code, remarks
 
 
-def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> None:
-    """Skip past SetupData, flags, Names, Voices, Programs, EventLog so the
-    next read lands on the Connection block. Mirrors clsHAC.cs:7995-8044."""
+def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> bytes:
+    """Walk SetupData, flags, Names, Voices, Programs, EventLog so the
+    next read lands on the Connection block. Returns the raw 21,000-byte
+    Programs blob so the caller can decode it; everything else is still
+    skipped as before. Mirrors clsHAC.cs:7995-8044."""
     r.bytes_(cap["lenSetupData"])
     r.bytes_(10)  # bool + bool + u16 + u16 + u32
 
@@ -297,8 +316,9 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> None:
         skip_slots = max(0, max_slots - items_count)
         r.bytes_(struct_slots * s_b + skip_slots * k_b)
 
-    r.bytes_(cap["max_programs"] * cap["program_bytes"])
+    programs_blob = r.bytes_(cap["max_programs"] * cap["program_bytes"])
     r.bytes_(cap["max_event_log"] * cap["event_bytes"])
+    return programs_blob
 
 
 def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> PcaAccount:
@@ -349,7 +369,7 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
         return account
 
     try:
-        _walk_to_connection(r, _CAP_OMNI_PRO_II)
+        programs_blob = _walk_to_connection(r, _CAP_OMNI_PRO_II)
         network_address = r.string8_fixed(120)
         port_str = r.string8_fixed(5)
         try:
@@ -358,6 +378,16 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
             network_port = 4369
         key_hex = r.string8_fixed(32).ljust(32, "0")[:32]
         controller_key = bytes.fromhex(key_hex)
+        # Decode the program table — non-fatal if it fails; Connection
+        # block has already been read so the network/key fields land
+        # regardless. A malformed Programs block likely means the body
+        # walker misaligned for a non-OMNI_PRO_II model, in which case
+        # leaving programs=() is the honest answer.
+        try:
+            programs: tuple[Program, ...] = decode_program_table(programs_blob)
+        except Exception:
+            _log.warning("failed to decode Programs block", exc_info=True)
+            programs = ()
     except (EOFError, ValueError):
         # Body layout depends on panel model; if the OMNI_PRO_II walker
         # misaligns for another model, leave the connection fields unset
@@ -367,4 +397,5 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.network_address = network_address
     account.network_port = network_port
     account.controller_key = controller_key
+    account.programs = programs
     return account

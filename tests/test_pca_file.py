@@ -94,6 +94,122 @@ def test_full_pca_parse_against_real_fixture() -> None:
     pass
 
 
+# ---- Programs block extraction against the live decrypted fixture ----
+#
+# These tests need the plaintext .pca dump at the path below — gitignored.
+# If absent, they skip cleanly. If present, they assert the decode against
+# the values established in the Phase 1 RE pass (Programs block, slot 22,
+# the TIMED/EVENT/YEARLY type-distribution counts).
+
+_FIXTURE = "/home/kdm/home-auto/HAI/pca-re/extracted/Our_House.pca.plain"
+
+
+def _load_programs_blob_or_skip() -> bytes:
+    from pathlib import Path
+
+    p = Path(_FIXTURE)
+    if not p.exists():
+        pytest.skip(f"fixture not available: {_FIXTURE}")
+    from omni_pca.pca_file import (
+        _CAP_OMNI_PRO_II,
+        PcaReader,
+        _parse_header,
+        _walk_to_connection,
+    )
+
+    r = PcaReader(p.read_bytes())
+    _parse_header(r)
+    return _walk_to_connection(r, _CAP_OMNI_PRO_II)
+
+
+def test_programs_block_decodes_against_live_fixture() -> None:
+    """All 1500 slots decode without raising; counts match Phase 1 recon."""
+    from collections import Counter
+
+    from omni_pca.programs import ProgramType, decode_program_table, iter_defined
+
+    blob = _load_programs_blob_or_skip()
+    assert len(blob) == 1500 * 14
+
+    programs = decode_program_table(blob)
+    assert len(programs) == 1500
+    defined = list(iter_defined(programs))
+    assert len(defined) == 330
+
+    types = Counter(p.prog_type for p in defined)
+    assert types[int(ProgramType.TIMED)] == 209
+    assert types[int(ProgramType.EVENT)] == 105
+    assert types[int(ProgramType.YEARLY)] == 16
+
+
+def test_programs_block_round_trips_byte_for_byte() -> None:
+    """The strongest correctness signal: decode → encode → compare.
+
+    If a single byte of the 21,000-byte blob is off, this test catches it.
+    """
+    from omni_pca.programs import decode_program_table
+
+    blob = _load_programs_blob_or_skip()
+    programs = decode_program_table(blob)
+    rebuilt = b"".join(p.encode_file_record() for p in programs)
+    assert rebuilt == blob
+
+
+def test_programs_sanity_invariants() -> None:
+    """Coarse invariants on the 330 defined programs.
+
+    The byte-for-byte round-trip test above is the load-bearing
+    correctness signal. This adds light coverage to catch a Mon/Day
+    swap regression specifically on YEARLY-typed programs (which use
+    bytes 9/10 as a true calendar date).
+
+    What we DON'T assert and why:
+
+    * **EVENT** programs encode a u16 event identifier in bytes 9/10
+      (see ``clsProgram.Evt`` at lines 152-163), not a calendar date.
+    * **TIMED** programs use bytes 12/13 either as absolute hour:minute
+      (0-23 : 0-59) *or* as a sunrise/sunset-relative offset
+      (Owner's Manual: ±0-120 minutes), with a flag we haven't
+      reverse-engineered yet. So hour=26 / minute=246 are valid wire
+      values in the absence of that flag decoder.
+    """
+    from omni_pca.programs import ProgramType, decode_program_table, iter_defined
+
+    blob = _load_programs_blob_or_skip()
+    programs = decode_program_table(blob)
+    defined = list(iter_defined(programs))
+
+    yearly = [p for p in defined if p.prog_type == int(ProgramType.YEARLY)]
+    assert yearly, "fixture should have YEARLY programs"
+    for p in yearly:
+        assert 1 <= p.month <= 12, (
+            f"slot {p.slot} YEARLY: month={p.month}"
+        )
+        assert 1 <= p.day <= 31, (
+            f"slot {p.slot} YEARLY: day={p.day}"
+        )
+
+
+def test_pca_account_dataclass_has_programs_field() -> None:
+    """``PcaAccount`` exposes ``programs`` with the expected type + default.
+
+    Verifies the API surface without needing a working .pca decrypt
+    key — the integration from raw blob through ``decode_program_table``
+    is covered by the other three live-fixture tests above.
+    """
+    from omni_pca.pca_file import PcaAccount
+
+    fields = {f.name: f for f in PcaAccount.__dataclass_fields__.values()}
+    assert "programs" in fields
+    # default_factory or default — the field should be an empty tuple
+    # when no programs are decoded.
+    inst = PcaAccount(
+        version_tag="PCA03", file_version=3,
+        model=16, firmware_major=2, firmware_minor=12, firmware_revision=1,
+    )
+    assert inst.programs == ()
+
+
 def test_pca_reader_io_state_introspection() -> None:
     r = PcaReader(b"abcdef")
     assert isinstance(r.buf, io.BytesIO)
