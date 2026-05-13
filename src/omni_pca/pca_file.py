@@ -242,6 +242,20 @@ class PcaAccount:
     # zone to area 1. Empty dict when SetupData wasn't walked successfully.
     zone_areas: dict[int, int] = field(default_factory=dict)
 
+    # Per-area entry/exit delay (seconds) from SetupData user section.
+    # Keys are 1-based area numbers (1..numAreas); typical values are
+    # 30/60 (entry) and 60/90 (exit). Unused areas carry the panel
+    # default (15 s in the live fixture).
+    area_entry_delays: dict[int, int] = field(default_factory=dict)
+    area_exit_delays: dict[int, int] = field(default_factory=dict)
+
+    # Panel-wide TempFormat (enuTempFormat: 1=Fahrenheit, 2=Celsius)
+    # and NumAreasUsed (count of armable security areas — 1 for a
+    # typical single-area home install, up to numAreas=8 on Omni Pro II).
+    # Both are 0 if SetupData wasn't walked successfully.
+    temp_format: int = 0
+    num_areas_used: int = 0
+
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
     """Decrypt ``data`` (raw PCA01.CFG bytes) and parse per clsPcaCfg.Read()."""
@@ -281,6 +295,22 @@ def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
 # correct totals up to that block, and OMNI_PRO_II is the working reference.
 _CAP_OMNI_PRO_II: dict[str, int] = {
     "lenSetupData": 3840,
+    # User section walks from offset 1 (Seek(1)). Fixed-width derivation:
+    #
+    #   1..5: TelephoneAccess+AnswerOutsideCall+RemoteCommandsOK+
+    #         RingsBeforeAnswer+DialMode (5×1 byte)
+    #   6..30: MyPhoneNumber (25 = 1 length + 24 payload, fixed-width)
+    #   31..310: Phone[0..7] (8 × 35: Number(25)+WhenOn(5)+WhenOff(5))
+    #   311..382: Areas[1..8].DialOrder (8 × 9 fixed-width String8)
+    #   383..1768: Codes[1..99] (99 × 14: Code(u16)+Authority(1)+
+    #              Areas(1)+WhenOn(5)+WhenOff(5))
+    #   1769..1770: Codes[251].Code (u16)
+    #   1771..1778: Areas[1..8].EntryDelay (8 bytes)
+    #   1779..1786: Areas[1..8].ExitDelay (8 bytes)
+    #
+    "entryDelayOffset": 1771,
+    "exitDelayOffset": 1779,
+
     # Installer section begins at byte 2560 (clsCapOMNI_PRO_II.instSetupStart).
     # Layout for OMNI_PRO_II observed empirically against the live fixture
     # and cross-checked against clsHAC._ParseSetupData (clsHAC.cs:3156-...).
@@ -317,6 +347,8 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     # Hardcoded for OMNI_PRO_II — other panels will need their own values.
     "instSetupStart": 2560,
     "zoneTypeOffset": 2572,
+    "tempFormatOffset": 2993,
+    "numAreasUsedOffset": 3034,
     "zoneAreaOffset": 3106,
     "max_zones": 176, "lenZoneName": 15, "zones_count": 176,
     "max_units": 512, "lenUnitName": 12, "units_count": 511,
@@ -432,6 +464,10 @@ class _ConnectionWalk:
     message_names: dict[int, str] = field(default_factory=dict)
     zone_types: dict[int, int] = field(default_factory=dict)
     zone_areas: dict[int, int] = field(default_factory=dict)
+    area_entry_delays: dict[int, int] = field(default_factory=dict)
+    area_exit_delays: dict[int, int] = field(default_factory=dict)
+    temp_format: int = 0
+    num_areas_used: int = 0
 
 
 def _read_name_table(r: PcaReader, count: int, name_len: int) -> dict[int, str]:
@@ -486,6 +522,26 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
             for slot in range(1, cap["max_zones"] + 1):
                 zone_areas[slot] = setup_data[za_off + slot - 1]
 
+    # Per-area entry/exit delays from the user section.
+    num_areas = cap.get("max_areas", 0)
+    entry_off = cap.get("entryDelayOffset")
+    area_entry_delays: dict[int, int] = {}
+    if entry_off is not None and entry_off + num_areas <= len(setup_data):
+        for slot in range(1, num_areas + 1):
+            area_entry_delays[slot] = setup_data[entry_off + slot - 1]
+
+    exit_off = cap.get("exitDelayOffset")
+    area_exit_delays: dict[int, int] = {}
+    if exit_off is not None and exit_off + num_areas <= len(setup_data):
+        for slot in range(1, num_areas + 1):
+            area_exit_delays[slot] = setup_data[exit_off + slot - 1]
+
+    # Scalars from the installer section.
+    tf_off = cap.get("tempFormatOffset")
+    temp_format = setup_data[tf_off] if tf_off is not None and tf_off < len(setup_data) else 0
+    na_off = cap.get("numAreasUsedOffset")
+    num_areas_used = setup_data[na_off] if na_off is not None and na_off < len(setup_data) else 0
+
     # Object family order per clsHAC body layout:
     # Zones → Units → Buttons → Codes → Thermostats → Areas → Messages.
     zone_names = _read_name_table(r, cap["max_zones"], cap["lenZoneName"])
@@ -526,6 +582,10 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         message_names=message_names,
         zone_types=zone_types,
         zone_areas=zone_areas,
+        area_entry_delays=area_entry_delays,
+        area_exit_delays=area_exit_delays,
+        temp_format=temp_format,
+        num_areas_used=num_areas_used,
     )
 
 
@@ -615,6 +675,10 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.message_names = walk.message_names
     account.zone_types = walk.zone_types
     account.zone_areas = walk.zone_areas
+    account.area_entry_delays = walk.area_entry_delays
+    account.area_exit_delays = walk.area_exit_delays
+    account.temp_format = walk.temp_format
+    account.num_areas_used = walk.num_areas_used
 
     # PCA03+ continues past Connection with ModemBaud flags + nine
     # Description blocks + the Remarks table. We walk it on a

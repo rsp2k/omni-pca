@@ -345,8 +345,22 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert len(state.units) == 44
     assert len(state.buttons) == 16
     assert len(state.thermostats) == 2
-    # Areas in this fixture have no names — that's fine, just verify.
-    assert len(state.areas) == 0
+    # Areas: this fixture has no user-assigned names but
+    # NumAreasUsed=1, so MockState.from_pca synthesizes a single
+    # unnamed area 1 with the .pca's entry/exit delays.
+    assert len(state.areas) == 1
+    assert state.areas[1].name == ""
+    assert state.areas[1].entry_delay == 60  # configured in PC Access
+    assert state.areas[1].exit_delay == 90
+    assert state.areas[1].enabled is True
+
+    # Sanity-check the raw PcaAccount scalars too.
+    from omni_pca.pca_file import parse_pca_file
+    acct = parse_pca_file(encrypted, key=KEY_EXPORT)
+    assert acct.temp_format == 1       # 1 = Fahrenheit
+    assert acct.num_areas_used == 1
+    assert acct.area_entry_delays[1] == 60
+    assert acct.area_exit_delays[1] == 90
     assert state.zones[1].name == "GARAGE ENTRY"
     assert state.units[1].name == "ROOM ONE"
     assert state.thermostats[1].name == "DOWNSTAIRS"

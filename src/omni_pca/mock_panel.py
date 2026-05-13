@@ -144,6 +144,9 @@ class MockAreaState:
     entry_timer: int = 0
     exit_timer: int = 0
     alarms: int = 0
+    entry_delay: int = 30  # seconds; configured grace period after a door opens
+    exit_delay: int = 60   # seconds; configured grace period after arming
+    enabled: bool = True   # whether this area is part of NumAreasUsed
 
 
 @dataclass
@@ -314,6 +317,14 @@ class MockState:
             for p in acct.programs
             if p.slot is not None and not p.is_empty()
         }
+        # Union of named areas and the "in-use" range from NumAreasUsed —
+        # an area is part of the install if either it has a user-assigned
+        # name OR the installer told the panel to use it. Most homes have
+        # a single unnamed area 1 + num_areas_used=1, which produces
+        # areas={1: MockAreaState(name="", enabled=True, ...)}.
+        in_use_areas = set(acct.area_names) | set(
+            range(1, acct.num_areas_used + 1)
+        )
         defaults: dict[str, Any] = {
             "model_byte": acct.model,
             "firmware_major": acct.firmware_major,
@@ -329,7 +340,15 @@ class MockState:
                 for i, n in acct.zone_names.items()
             },
             "units": {i: MockUnitState(name=n) for i, n in acct.unit_names.items()},
-            "areas": {i: MockAreaState(name=n) for i, n in acct.area_names.items()},
+            "areas": {
+                i: MockAreaState(
+                    name=acct.area_names.get(i, ""),
+                    entry_delay=acct.area_entry_delays.get(i, 30),
+                    exit_delay=acct.area_exit_delays.get(i, 60),
+                    enabled=i <= acct.num_areas_used,
+                )
+                for i in sorted(in_use_areas)
+            },
             "thermostats": {
                 i: MockThermostatState(name=n)
                 for i, n in acct.thermostat_names.items()
@@ -1035,9 +1054,9 @@ class MockPanel:
                     area.alarms if area else 0,
                     area.entry_timer if area else 0,
                     area.exit_timer if area else 0,
-                    1,  # Enabled
-                    60,  # ExitDelay (s)
-                    30,  # EntryDelay (s)
+                    (1 if (area and area.enabled) else 0),
+                    area.exit_delay if area else 60,
+                    area.entry_delay if area else 30,
                 ]
             )
             + self.state.area_name_bytes(index)
