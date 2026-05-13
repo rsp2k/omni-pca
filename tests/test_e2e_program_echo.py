@@ -340,6 +340,16 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert state.firmware_major == 2
     # Programs: 330 defined per Phase 1 recon.
     assert len(state.programs) == 330
+    # Names: per the live fixture's reconnaissance dump.
+    assert len(state.zones) == 16
+    assert len(state.units) == 44
+    assert len(state.buttons) == 16
+    assert len(state.thermostats) == 2
+    # Areas in this fixture have no names — that's fine, just verify.
+    assert len(state.areas) == 0
+    assert state.zones[1].name == "GARAGE ENTRY"
+    assert state.units[1].name == "ROOM ONE"
+    assert state.thermostats[1].name == "DOWNSTAIRS"
 
     panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
     async with panel.serve(transport="tcp") as (host, port):

@@ -119,7 +119,7 @@ def _load_programs_blob_or_skip() -> bytes:
 
     r = PcaReader(p.read_bytes())
     _parse_header(r)
-    return _walk_to_connection(r, _CAP_OMNI_PRO_II)
+    return _walk_to_connection(r, _CAP_OMNI_PRO_II).programs_blob
 
 
 def test_programs_block_decodes_against_live_fixture() -> None:

@@ -280,14 +280,21 @@ class MockState:
         * ``model_byte`` + ``firmware_*`` — drive SystemInformation replies
           so a connected client sees the panel the .pca came from.
         * ``programs`` — every non-empty Program record from the 1500-slot
-          table, encoded back to wire bytes so UploadProgram / UploadPrograms
-          serve them exactly as a real panel would.
+          table, encoded back to wire bytes so UploadProgram /
+          UploadPrograms serve them exactly as a real panel would.
+        * ``zones`` / ``units`` / ``areas`` / ``thermostats`` / ``buttons``
+          — populated with the names from the .pca's Names section. Each
+          entry is a ``MockZoneState`` / ``MockUnitState`` / etc. with
+          only ``name`` set; other fields (zone_type, area assignment,
+          thermostat type, …) default to 0 because those properties live
+          in SetupData, which we don't decode yet.
 
-        Everything else uses MockState defaults (or whatever the caller
-        passes as ``**overrides``). Per-object name/state tables aren't
-        in the .pca header that pca_file currently extracts, so zones /
-        units / areas / thermostats default to empty unless the caller
-        explicitly provides them.
+        ``user_codes`` is not seeded — the .pca only stores code *names*,
+        not the PIN values; the panel keeps PINs in SetupData. Override
+        explicitly if a test needs them.
+
+        Anything else uses MockState defaults. Pass kwargs to override
+        any seeded field.
 
         ``key=0`` only works for files where the export keystream was
         already applied (e.g., the result of ``decrypt_pca_bytes`` with
@@ -308,6 +315,16 @@ class MockState:
             "firmware_minor": acct.firmware_minor,
             "firmware_revision": acct.firmware_revision,
             "programs": programs,
+            "zones": {i: MockZoneState(name=n) for i, n in acct.zone_names.items()},
+            "units": {i: MockUnitState(name=n) for i, n in acct.unit_names.items()},
+            "areas": {i: MockAreaState(name=n) for i, n in acct.area_names.items()},
+            "thermostats": {
+                i: MockThermostatState(name=n)
+                for i, n in acct.thermostat_names.items()
+            },
+            "buttons": {
+                i: MockButtonState(name=n) for i, n in acct.button_names.items()
+            },
         }
         defaults.update(overrides)
         return cls(**defaults)

@@ -214,6 +214,20 @@ class PcaAccount:
     basis — failure here doesn't break Connection extraction.
     """
 
+    # Per-object name tables — populated from the Names block between
+    # SetupData and Voices. Keys are 1-based slot numbers; empty slots
+    # are omitted entirely (the panel stores them as length-0 String8
+    # blobs, which we filter at read time). Properties beyond the name
+    # (zone_type, area assignment, thermostat type, etc.) live in
+    # SetupData and aren't extracted yet.
+    zone_names: dict[int, str] = field(default_factory=dict)
+    unit_names: dict[int, str] = field(default_factory=dict)
+    button_names: dict[int, str] = field(default_factory=dict)
+    code_names: dict[int, str] = field(default_factory=dict)
+    thermostat_names: dict[int, str] = field(default_factory=dict)
+    area_names: dict[int, str] = field(default_factory=dict)
+    message_names: dict[int, str] = field(default_factory=dict)
+
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
     """Decrypt ``data`` (raw PCA01.CFG bytes) and parse per clsPcaCfg.Read()."""
@@ -345,25 +359,66 @@ def _walk_to_remarks(r: PcaReader) -> dict[int, str]:
         return {}
 
 
-def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> bytes:
+@dataclass
+class _ConnectionWalk:
+    """Side-channel output of :func:`_walk_to_connection`.
+
+    Captures the per-object name tables on the way past so the caller
+    can attach them to :class:`PcaAccount`. Each ``*_names`` dict is
+    ``{1-based slot: name}`` with only non-empty slots present —
+    matches the "iter_defined" convention used for programs.
+    """
+
+    programs_blob: bytes
+    zone_names: dict[int, str] = field(default_factory=dict)
+    unit_names: dict[int, str] = field(default_factory=dict)
+    button_names: dict[int, str] = field(default_factory=dict)
+    code_names: dict[int, str] = field(default_factory=dict)
+    thermostat_names: dict[int, str] = field(default_factory=dict)
+    area_names: dict[int, str] = field(default_factory=dict)
+    message_names: dict[int, str] = field(default_factory=dict)
+
+
+def _read_name_table(r: PcaReader, count: int, name_len: int) -> dict[int, str]:
+    """Read ``count`` String8(name_len) slots; return only non-empty ones.
+
+    Per-slot layout per ``clsAbstractNamedItem.ReadName`` /
+    ``clsPcaCryptFileStream.ReadString8(out S, byte L)``:
+
+      ``[1 byte actual length][name_len bytes name]``
+
+    The length byte is 0 for unused slots. We use ``string8_fixed`` to
+    consume exactly ``1 + name_len`` bytes per slot regardless.
+    """
+    out: dict[int, str] = {}
+    for i in range(1, count + 1):
+        name = r.string8_fixed(name_len)
+        if name:
+            out[i] = name
+    return out
+
+
+def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
     """Walk SetupData, flags, Names, Voices, Programs, EventLog so the
-    next read lands on the Connection block. Returns the raw 21,000-byte
-    Programs blob so the caller can decode it; everything else is still
-    skipped as before. Mirrors clsHAC.cs:7995-8044."""
+    next read lands on the Connection block. Captures per-object name
+    tables on the way past and returns them alongside the Programs blob.
+
+    Mirrors clsHAC.cs:7995-8044. The per-object names are read via
+    clsAbstractNamedItem.ReadName → String8(L) — see
+    :func:`_read_name_table` for the per-slot layout.
+    """
     r.bytes_(cap["lenSetupData"])
     r.bytes_(10)  # bool + bool + u16 + u16 + u32
 
-    name_specs = [
-        (cap["max_zones"], cap["lenZoneName"]),
-        (cap["max_units"], cap["lenUnitName"]),
-        (cap["max_buttons"], cap["lenButtonName"]),
-        (cap["max_codes"], cap["lenCodeName"]),
-        (cap["max_tstats"], cap["lenTstatName"]),
-        (cap["max_areas"], cap["lenAreaName"]),
-        (cap["max_messages"], cap["lenMessageName"]),
-    ]
-    for max_slots, name_len in name_specs:
-        r.bytes_(max_slots * (1 + name_len))
+    # Object family order per clsHAC body layout:
+    # Zones → Units → Buttons → Codes → Thermostats → Areas → Messages.
+    zone_names = _read_name_table(r, cap["max_zones"], cap["lenZoneName"])
+    unit_names = _read_name_table(r, cap["max_units"], cap["lenUnitName"])
+    button_names = _read_name_table(r, cap["max_buttons"], cap["lenButtonName"])
+    code_names = _read_name_table(r, cap["max_codes"], cap["lenCodeName"])
+    thermostat_names = _read_name_table(r, cap["max_tstats"], cap["lenTstatName"])
+    area_names = _read_name_table(r, cap["max_areas"], cap["lenAreaName"])
+    message_names = _read_name_table(r, cap["max_messages"], cap["lenMessageName"])
 
     # Voices: structured slots are 12 B (LargeVocabulary), skip slots 6 B.
     voice_specs = [
@@ -384,7 +439,16 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> bytes:
 
     programs_blob = r.bytes_(cap["max_programs"] * cap["program_bytes"])
     r.bytes_(cap["max_event_log"] * cap["event_bytes"])
-    return programs_blob
+    return _ConnectionWalk(
+        programs_blob=programs_blob,
+        zone_names=zone_names,
+        unit_names=unit_names,
+        button_names=button_names,
+        code_names=code_names,
+        thermostat_names=thermostat_names,
+        area_names=area_names,
+        message_names=message_names,
+    )
 
 
 def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> PcaAccount:
@@ -435,7 +499,7 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
         return account
 
     try:
-        programs_blob = _walk_to_connection(r, _CAP_OMNI_PRO_II)
+        walk = _walk_to_connection(r, _CAP_OMNI_PRO_II)
         network_address = r.string8_fixed(120)
         port_str = r.string8_fixed(5)
         try:
@@ -450,7 +514,7 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
         # walker misaligned for a non-OMNI_PRO_II model, in which case
         # leaving programs=() is the honest answer.
         try:
-            programs: tuple[Program, ...] = decode_program_table(programs_blob)
+            programs: tuple[Program, ...] = decode_program_table(walk.programs_blob)
         except Exception:
             _log.warning("failed to decode Programs block", exc_info=True)
             programs = ()
@@ -464,6 +528,13 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.network_port = network_port
     account.controller_key = controller_key
     account.programs = programs
+    account.zone_names = walk.zone_names
+    account.unit_names = walk.unit_names
+    account.button_names = walk.button_names
+    account.code_names = walk.code_names
+    account.thermostat_names = walk.thermostat_names
+    account.area_names = walk.area_names
+    account.message_names = walk.message_names
 
     # PCA03+ continues past Connection with ModemBaud flags + nine
     # Description blocks + the Remarks table. We walk it on a

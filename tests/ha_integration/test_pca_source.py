@@ -103,6 +103,61 @@ async def test_pca_source_overrides_wire_programs(
     assert int(sensors[0].state) == 330
 
 
+async def test_mockpanel_from_pca_drives_full_ha_discovery(
+    hass: HomeAssistant, tmp_path: Path
+) -> None:
+    """End-to-end: build a MockPanel state straight from the live .pca,
+    then point HA at that mock with no other configuration. The
+    integration should discover *every* named zone / unit / button /
+    thermostat from the .pca via the normal wire path — no .pca config
+    needed, because the mock is now serving real data.
+    """
+    if not LIVE_FIXTURE_PLAIN.is_file():
+        pytest.skip(f"live .pca fixture missing: {LIVE_FIXTURE_PLAIN}")
+
+    from custom_components.omni_pca.const import CONF_CONTROLLER_KEY
+    from omni_pca.mock_panel import MockPanel, MockState
+    from omni_pca.pca_file import KEY_EXPORT, decrypt_pca_bytes
+
+    encrypted = decrypt_pca_bytes(LIVE_FIXTURE_PLAIN.read_bytes(), KEY_EXPORT)
+    state = MockState.from_pca(encrypted, key=KEY_EXPORT)
+    # Sanity — the from_pca seeding matches the live fixture's names.
+    assert len(state.zones) == 16
+    assert len(state.units) == 44
+
+    panel = MockPanel(
+        controller_key=bytes(range(16)),  # matches CONTROLLER_KEY_HEX
+        state=state,
+    )
+    async with panel.serve(host="127.0.0.1") as (host, port):
+        entry = MockConfigEntry(
+            domain=DOMAIN,
+            data={
+                CONF_HOST: host,
+                CONF_PORT: port,
+                CONF_CONTROLLER_KEY: CONTROLLER_KEY_HEX,
+            },
+            title=f"Mock Omni @ {host}:{port} (from .pca)",
+            unique_id=f"{host}:{port}",
+        )
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        try:
+            coordinator = hass.data[DOMAIN][entry.entry_id]
+            # All 16 zones surfaced through normal wire discovery.
+            assert len(coordinator.data.zones) == 16
+            # Units, buttons, thermostats too.
+            assert len(coordinator.data.units) == 44
+            assert len(coordinator.data.buttons) == 16
+            assert len(coordinator.data.thermostats) == 2
+            # And the programs sensor reflects 330 from wire iter_programs.
+            assert len(coordinator.data.programs) == 330
+        finally:
+            await hass.config_entries.async_unload(entry.entry_id)
+            await hass.async_block_till_done()
+
+
 async def test_pca_path_validation_rejects_missing_file(
     hass: HomeAssistant, tmp_path: Path
 ) -> None:
