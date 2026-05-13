@@ -208,6 +208,39 @@ class OmniClientV1:
     async def list_button_names(self) -> dict[int, str]:
         return (await self.list_all_names()).get(int(NameType.BUTTON), {})
 
+    # ---- programs (streaming UploadPrograms) -----------------------------
+
+    async def iter_programs(self) -> AsyncIterator["Program"]:
+        """Stream every defined program from the panel.
+
+        v1 has no per-slot request — a bare ``UploadPrograms`` triggers
+        the panel to dump every defined program in ascending slot order,
+        each as a separate ``ProgramData`` reply that we must
+        ``Acknowledge`` to advance.
+
+        Reference: clsHAC.cs:4403 (bare UploadPrograms send), 4642-4651
+        (per-reply ack-walk), 4538-4540 (dispatch).
+
+        Yields decoded :class:`omni_pca.programs.Program` instances.
+        Empty slots are not transmitted — the iterator only sees defined
+        programs.
+        """
+        from ..programs import Program
+        async for reply in self._conn.iter_streaming(
+            OmniLinkMessageType.UploadPrograms
+        ):
+            if reply.opcode != int(OmniLinkMessageType.ProgramData):
+                raise OmniProtocolError(
+                    f"unexpected opcode {reply.opcode} during UploadPrograms stream "
+                    f"(expected {int(OmniLinkMessageType.ProgramData)})"
+                )
+            if len(reply.payload) < 2 + 14:
+                raise OmniProtocolError(
+                    f"ProgramData payload too short ({len(reply.payload)} bytes)"
+                )
+            slot = (reply.payload[0] << 8) | reply.payload[1]
+            yield Program.from_wire_bytes(reply.payload[2 : 2 + 14], slot=slot)
+
     # ---- write methods (Command + ExecuteSecurityCommand) ----------------
     #
     # The Command and ExecuteSecurityCommand payloads are byte-identical

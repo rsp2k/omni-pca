@@ -712,18 +712,37 @@ class MockPanel:
         return _build_nak(opcode), ()
 
     def _reply_program_data(self, payload: bytes) -> Message:
-        """Single-shot v2 program read.
+        """v2 program read — single-slot OR iterator.
 
         Request payload: ``[number_hi, number_lo, request_reason]`` (3 bytes
         per ``clsOL2MsgUploadProgram``). Reply payload: ``[number_hi,
         number_lo] + raw_14_byte_body`` per ``clsOL2MsgProgramData``.
 
-        If the slot is missing from ``state.programs`` we serve 14 zero
-        bytes — same as a real panel reporting an empty slot.
+        ``request_reason`` semantics mirror the C# ReadConfig flow at
+        clsHAC.cs:4985 / 5331:
+
+          0 → return the exact requested slot (zero body if undefined).
+          1 → "next defined": return the lowest slot strictly greater
+              than the requested number. If none, return EOD. The
+              C# client iterates by feeding back each received slot
+              number with reason=1 until EOD.
+
+        Any other reason value is treated as reason=0 (we have no other
+        captures showing alternate semantics).
         """
         if len(payload) < 2:
             return _build_nak(OmniLink2MessageType.UploadProgram)
         number = (payload[0] << 8) | payload[1]
+        reason = payload[2] if len(payload) >= 3 else 0
+        if reason == 1:
+            # "Next defined after this slot." If start_slot=0 (initial
+            # call) and no programs are defined, we fall straight to EOD.
+            next_slot = min(
+                (s for s in self.state.programs if s > number), default=None
+            )
+            if next_slot is None:
+                return encode_v2(OmniLink2MessageType.EOD, b"")
+            number = next_slot
         body = self.state.programs.get(number, b"\x00" * 14)
         if len(body) != 14:
             return _build_nak(OmniLink2MessageType.UploadProgram)

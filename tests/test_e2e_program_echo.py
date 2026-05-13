@@ -217,3 +217,128 @@ async def test_v1_upload_programs_empty_state_yields_immediate_eod() -> None:
                 )
             ]
     assert replies == []
+
+
+# ---- v2 iter_programs (reason=1 "next defined" iteration) ---------------
+
+
+@pytest.mark.asyncio
+async def test_v2_upload_program_reason1_returns_next_defined_slot() -> None:
+    """``request_reason=1`` should return the lowest defined slot strictly
+    greater than the requested number — the C# panel uses this to iterate
+    (clsHAC.cs:5331)."""
+    seeded = {
+        5: Program(slot=5, prog_type=int(ProgramType.TIMED), cmd=3),
+        12: Program(slot=12, prog_type=int(ProgramType.TIMED), cmd=3),
+        99: Program(slot=99, prog_type=int(ProgramType.EVENT), cmd=5),
+    }
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(programs={s: p.encode_wire_bytes() for s, p in seeded.items()}),
+    )
+    async with (
+        panel.serve(transport="tcp") as (host, port),
+        OmniConnection(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as conn,
+    ):
+        # Seed slot 0 with reason=1 → first defined slot (5).
+        reply = await conn.request(
+            OmniLink2MessageType.UploadProgram, struct.pack(">HB", 0, 1)
+        )
+        assert reply.opcode == int(OmniLink2MessageType.ProgramData)
+        assert (reply.payload[0] << 8) | reply.payload[1] == 5
+
+        # From slot 5 with reason=1 → slot 12.
+        reply = await conn.request(
+            OmniLink2MessageType.UploadProgram, struct.pack(">HB", 5, 1)
+        )
+        assert (reply.payload[0] << 8) | reply.payload[1] == 12
+
+        # From slot 12 with reason=1 → slot 99.
+        reply = await conn.request(
+            OmniLink2MessageType.UploadProgram, struct.pack(">HB", 12, 1)
+        )
+        assert (reply.payload[0] << 8) | reply.payload[1] == 99
+
+        # From slot 99 with reason=1 → EOD (no more).
+        reply = await conn.request(
+            OmniLink2MessageType.UploadProgram, struct.pack(">HB", 99, 1)
+        )
+        assert reply.opcode == int(OmniLink2MessageType.EOD)
+
+
+@pytest.mark.asyncio
+async def test_v2_client_iter_programs_enumerates_all_seeded() -> None:
+    """High-level OmniClient.iter_programs() drives the reason=1 iteration
+    and yields decoded Program records in slot-ascending order."""
+    from omni_pca.client import OmniClient
+    seeded = {
+        12: Program(slot=12, prog_type=int(ProgramType.TIMED), cmd=3, hour=6, minute=0,
+                    days=int(Days.MONDAY | Days.FRIDAY)),
+        42: Program(slot=42, prog_type=int(ProgramType.TIMED), cond=0x8D09, cond2=0x9B09,
+                    cmd=0x44, par=3, pr2=0x0100, month=8, day=12,
+                    days=int(Days.MONDAY), hour=7, minute=15),
+        99: Program(slot=99, prog_type=int(ProgramType.EVENT), cmd=5, month=5, day=12),
+    }
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(programs={s: p.encode_wire_bytes() for s, p in seeded.items()}),
+    )
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as c:
+            received = [p async for p in c.iter_programs()]
+
+    assert [p.slot for p in received] == [12, 42, 99]
+    for got, want in zip(received, seeded.values()):
+        assert got.prog_type == want.prog_type
+        assert got.cmd == want.cmd
+        assert got.hour == want.hour
+        assert got.minute == want.minute
+
+
+@pytest.mark.asyncio
+async def test_v2_client_iter_programs_empty_state_yields_nothing() -> None:
+    from omni_pca.client import OmniClient
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=MockState())
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as c:
+            received = [p async for p in c.iter_programs()]
+    assert received == []
+
+
+# ---- v1 client iter_programs (high-level wrapper over iter_streaming) ----
+
+
+@pytest.mark.asyncio
+async def test_v1_client_iter_programs_enumerates_all_seeded() -> None:
+    seeded = {
+        12: Program(slot=12, prog_type=int(ProgramType.TIMED), cmd=3, hour=6, minute=0,
+                    days=int(Days.MONDAY | Days.FRIDAY)),
+        42: Program(slot=42, prog_type=int(ProgramType.TIMED), cond=0x8D09, cond2=0x9B09,
+                    cmd=0x44, par=3, pr2=0x0100, month=8, day=12,
+                    days=int(Days.MONDAY), hour=7, minute=15),
+        99: Program(slot=99, prog_type=int(ProgramType.EVENT), cmd=5, month=5, day=12),
+    }
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(programs={s: p.encode_wire_bytes() for s, p in seeded.items()}),
+    )
+    async with panel.serve(transport="udp") as (host, port):
+        async with OmniClientV1(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as c:
+            received = [p async for p in c.iter_programs()]
+
+    assert [p.slot for p in received] == [12, 42, 99]
+    for got, want in zip(received, seeded.values()):
+        assert got.prog_type == want.prog_type
+        assert got.cmd == want.cmd
+        assert got.cond == want.cond
+        assert got.cond2 == want.cond2
+        assert got.hour == want.hour
+        assert got.minute == want.minute

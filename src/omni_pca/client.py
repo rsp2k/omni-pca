@@ -607,6 +607,45 @@ class OmniClient:
         """
         await self.execute_command(Command.CLEAR_MESSAGE, parameter2=index)
 
+    # ---- program enumeration --------------------------------------------
+
+    async def iter_programs(self) -> AsyncIterator["Program"]:
+        """Stream every defined program from the panel.
+
+        v2 has no bulk "send all programs" opcode; instead the panel
+        exposes an iterator semantic via ``UploadProgram`` with
+        ``request_reason=1`` ("next defined after this slot"). We seed
+        with slot 0 and follow each reply's ``ProgramNumber`` back into
+        the next request until the panel sends EOD.
+
+        Mirrors the C# ReadConfig loop at ``clsHAC.OL2ReadConfigProcessProgramData``
+        (clsHAC.cs:5323-5332) and the seed call at clsHAC.cs:4985.
+
+        Yields decoded :class:`omni_pca.programs.Program` instances, one
+        per defined slot in ascending slot order. Empty slots are
+        skipped by the panel — the iterator only sees defined programs.
+        """
+        from .programs import Program  # local import: avoids cycle in __init__
+        slot = 0
+        while True:
+            payload = bytes([(slot >> 8) & 0xFF, slot & 0xFF, 1])
+            reply = await self._conn.request(
+                OmniLink2MessageType.UploadProgram, payload
+            )
+            if reply.opcode == int(OmniLink2MessageType.EOD):
+                return
+            if reply.opcode != int(OmniLink2MessageType.ProgramData):
+                raise OmniConnectionError(
+                    f"unexpected opcode {reply.opcode} during UploadProgram iteration "
+                    f"(expected {int(OmniLink2MessageType.ProgramData)})"
+                )
+            if len(reply.payload) < 2 + 14:
+                raise OmniConnectionError(
+                    f"ProgramData payload too short ({len(reply.payload)} bytes)"
+                )
+            slot = (reply.payload[0] << 8) | reply.payload[1]
+            yield Program.from_wire_bytes(reply.payload[2 : 2 + 14], slot=slot)
+
     # ---- helpers (status) -----------------------------------------------
 
     async def _fetch_status_range(
