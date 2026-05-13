@@ -315,6 +315,48 @@ async def test_v2_client_iter_programs_empty_state_yields_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
+    """End-to-end: build MockState from the live .pca, drive iter_programs
+    over v2 wire, decode every yielded Program. This exercises the full
+    file → mock → wire → decoder pipeline with real on-disk data.
+
+    The fixture is the same plain-text dump tests/test_pca_file.py uses;
+    we re-encrypt with KEY_EXPORT on the fly so parse_pca_file accepts it.
+    """
+    from pathlib import Path
+
+    from omni_pca.client import OmniClient
+    from omni_pca.mock_panel import MockState
+    from omni_pca.pca_file import KEY_EXPORT, decrypt_pca_bytes
+
+    plain = Path("/home/kdm/home-auto/HAI/pca-re/extracted/Our_House.pca.plain")
+    if not plain.is_file():
+        pytest.skip(f"live fixture missing: {plain}")
+    encrypted = decrypt_pca_bytes(plain.read_bytes(), KEY_EXPORT)
+
+    state = MockState.from_pca(encrypted, key=KEY_EXPORT)
+    # SystemInfo fields were populated from the .pca header.
+    assert state.model_byte == 16          # OMNI_PRO_II
+    assert state.firmware_major == 2
+    # Programs: 330 defined per Phase 1 recon.
+    assert len(state.programs) == 330
+
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as c:
+            decoded = [p async for p in c.iter_programs()]
+
+    # Every defined slot streamed back, in ascending slot order.
+    assert len(decoded) == 330
+    assert [p.slot for p in decoded] == sorted(state.programs)
+    # Spot check: every decoded record has a known ProgramType.
+    for p in decoded:
+        assert p.prog_type in {1, 2, 3}  # TIMED / EVENT / YEARLY from this fixture
+
+
+@pytest.mark.asyncio
 async def test_v1_client_iter_programs_enumerates_all_seeded() -> None:
     seeded = {
         12: Program(slot=12, prog_type=int(ProgramType.TIMED), cmd=3, hour=6, minute=0,

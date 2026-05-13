@@ -52,7 +52,7 @@ import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from .commands import Command
 from .crypto import (
@@ -265,6 +265,52 @@ class MockState:
         self.areas = _promote_dict(self.areas, MockAreaState)
         self.thermostats = _promote_dict(self.thermostats, MockThermostatState)
         self.buttons = _promote_dict(self.buttons, MockButtonState)
+
+    @classmethod
+    def from_pca(
+        cls,
+        path_or_bytes: str | bytes,
+        key: int,
+        **overrides: Any,
+    ) -> MockState:
+        """Build a MockState seeded from a real .pca file.
+
+        Populated from the .pca:
+
+        * ``model_byte`` + ``firmware_*`` — drive SystemInformation replies
+          so a connected client sees the panel the .pca came from.
+        * ``programs`` — every non-empty Program record from the 1500-slot
+          table, encoded back to wire bytes so UploadProgram / UploadPrograms
+          serve them exactly as a real panel would.
+
+        Everything else uses MockState defaults (or whatever the caller
+        passes as ``**overrides``). Per-object name/state tables aren't
+        in the .pca header that pca_file currently extracts, so zones /
+        units / areas / thermostats default to empty unless the caller
+        explicitly provides them.
+
+        ``key=0`` only works for files where the export keystream was
+        already applied (e.g., the result of ``decrypt_pca_bytes`` with
+        the same key); use ``KEY_EXPORT`` (391549495) for unmodified
+        PC Access exports.
+        """
+        from .pca_file import parse_pca_file
+
+        acct = parse_pca_file(path_or_bytes, key=key)
+        programs = {
+            p.slot: p.encode_wire_bytes()
+            for p in acct.programs
+            if p.slot is not None and not p.is_empty()
+        }
+        defaults: dict[str, Any] = {
+            "model_byte": acct.model,
+            "firmware_major": acct.firmware_major,
+            "firmware_minor": acct.firmware_minor,
+            "firmware_revision": acct.firmware_revision,
+            "programs": programs,
+        }
+        defaults.update(overrides)
+        return cls(**defaults)
 
     # ---- name-bytes helpers (kept for back-compat with old callers) -----
 
