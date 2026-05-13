@@ -162,6 +162,10 @@ async def test_mockpanel_from_pca_drives_full_ha_discovery(
             assert zone_types_by_slot[3] == 0x01     # BACK DOOR → Perimeter
             assert zone_types_by_slot[7] == 0x03     # LIVINGROOM MOT → AwayInt
             assert zone_types_by_slot[11] == 0x55    # OUTSIDE TEMP → outdoor temp
+            # Per-zone area assignments — single-area install, every
+            # zone surfaces as area=1 through the wire Properties reply.
+            for idx, z in coordinator.data.zones.items():
+                assert z.area == 1, f"zone {idx} expected area=1 got {z.area}"
         finally:
             await hass.config_entries.async_unload(entry.entry_id)
             await hass.async_block_till_done()

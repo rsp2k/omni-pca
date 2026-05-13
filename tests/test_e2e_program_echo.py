@@ -358,6 +358,10 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert state.zones[3].zone_type == 0x01     # BACK DOOR → Perimeter
     assert state.zones[7].zone_type == 0x03     # LIVINGROOM MOT → AwayInt
     assert state.zones[11].zone_type == 0x55    # OUTSIDE TEMP → outdoor temp
+    # Zone area assignments from SetupData — single-area install, all
+    # zones in area 1.
+    for slot, zone in state.zones.items():
+        assert zone.area == 1, f"slot {slot} expected area=1 got {zone.area}"
 
     panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
     async with panel.serve(transport="tcp") as (host, port):

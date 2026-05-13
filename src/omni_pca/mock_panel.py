@@ -324,6 +324,7 @@ class MockState:
                 i: MockZoneState(
                     name=n,
                     zone_type=acct.zone_types.get(i, 0),
+                    area=acct.zone_areas.get(i, 1),
                 )
                 for i, n in acct.zone_names.items()
             },

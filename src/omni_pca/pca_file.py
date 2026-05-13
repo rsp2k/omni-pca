@@ -236,6 +236,12 @@ class PcaAccount:
     # Empty dict when SetupData wasn't walked successfully.
     zone_types: dict[int, int] = field(default_factory=dict)
 
+    # Per-zone area assignment from SetupData installer section. Keys
+    # are 1-based slot numbers (always 1..numZones); values are 1-based
+    # area numbers (1..numAreas). Most single-area installs assign every
+    # zone to area 1. Empty dict when SetupData wasn't walked successfully.
+    zone_areas: dict[int, int] = field(default_factory=dict)
+
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
     """Decrypt ``data`` (raw PCA01.CFG bytes) and parse per clsPcaCfg.Read()."""
@@ -276,16 +282,42 @@ def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
 _CAP_OMNI_PRO_II: dict[str, int] = {
     "lenSetupData": 3840,
     # Installer section begins at byte 2560 (clsCapOMNI_PRO_II.instSetupStart).
-    # Layout for OMNI_PRO_II observed empirically against the live fixture:
-    #   offset 2560: HouseCode (1 byte)
-    #   offsets 2561..2569: OutputType[0..8] (9 bytes; numVoltOutputs)
-    #   offset 2570: ZoneExpansions (1 byte; ZoneExpansions feature)
-    #   offset 2571: NumExpEnc (1 byte; firstExpEncOut != 0)
-    #   offsets 2572..2747: ZoneType[1..176] (176 bytes; enuZoneType per zone)
-    # The trailing 12 bytes from 2560..2571 are the preamble. Hardcoded
-    # for OMNI_PRO_II — other panels will need their own constants.
+    # Layout for OMNI_PRO_II observed empirically against the live fixture
+    # and cross-checked against clsHAC._ParseSetupData (clsHAC.cs:3156-...).
+    #
+    #   2560: HouseCode (1 byte)
+    #   2561..2569: OutputType[0..8] (9 bytes; numVoltOutputs)
+    #   2570: ZoneExpansions (1 byte)
+    #   2571: NumExpEnc (1 byte; firstExpEncOut != 0)
+    #   2572..2747: ZoneType[1..176] (176 bytes; raw enuZoneType byte/zone)
+    #   2748..2772: DCMPhoneNumber1 (25-byte fixed-width string)
+    #   2773..2774: DCMAccount1 (u16)
+    #   2775..2799: DCMPhoneNumber2 (25)
+    #   2800..2801: DCMAccount2 (u16)
+    #   2802: DCMType (1)
+    #   2803..2807: DCMTestTime (5-byte clsWhen: Hr,Min,Mon,Day,DOW)
+    #   2808: DCMTestCode (1)
+    #   2809..2984: Zones[].DCMAlarmCode (176 bytes)
+    #   2985..2992: DCMFreezeAlm/Fire/Police/Aux/Duress/BatteryLow/FireZone/Cancel (8)
+    #   2993..3004: TempFormat, NumThermostats, InstallerCode(u16),
+    #               EnablePCAccess, PCAccessCode(u16), ...
+    #   2993: TempFormat / 2994: NumThermostats / 2995..2996: InstallerCode
+    #   2997: EnablePCAccess / 2998..2999: PCAccessCode
+    #   3000..3024: CallBackNumber (25)
+    #   3025: ExteriorHornDelay / 3026: DialoutDelay / 3027: VerifyFireAlarms
+    #   3028: EnableConsoleEmg / 3029: TimeFormat / 3030: DateFormat
+    #   3031: ACPowerFreq / 3032: DeadLineDetect / 3033: OffHookDetect
+    #   3034: NumAreasUsed
+    #   3035..3050: X10 AreaGroups (16 bytes; (lastX10-firstX10+16)/16)
+    #   3051..3058: VoltOut AreaGroups (8; lastVoltOut-firstVoltOut+1)
+    #   3059..3073: FlagOut AreaGroups (15; (lastFlagOut-firstFlagOut+8)/8)
+    #   3074..3105: ExpEnc AreaGroups (32; (lastExpEncOut-firstExpEncOut+4)/4)
+    #   3106..3281: Zones[1..176].Area (176 bytes — area number per zone)
+    #
+    # Hardcoded for OMNI_PRO_II — other panels will need their own values.
     "instSetupStart": 2560,
     "zoneTypeOffset": 2572,
+    "zoneAreaOffset": 3106,
     "max_zones": 176, "lenZoneName": 15, "zones_count": 176,
     "max_units": 512, "lenUnitName": 12, "units_count": 511,
     "max_buttons": 128, "lenButtonName": 12, "buttons_count": 255,
@@ -399,6 +431,7 @@ class _ConnectionWalk:
     area_names: dict[int, str] = field(default_factory=dict)
     message_names: dict[int, str] = field(default_factory=dict)
     zone_types: dict[int, int] = field(default_factory=dict)
+    zone_areas: dict[int, int] = field(default_factory=dict)
 
 
 def _read_name_table(r: PcaReader, count: int, name_len: int) -> dict[int, str]:
@@ -435,7 +468,7 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
     setup_data = r.bytes_(cap["lenSetupData"])
     r.bytes_(10)  # bool + bool + u16 + u16 + u32
 
-    # Pull ZoneType from the installer section of SetupData.
+    # Pull ZoneType and Zones[].Area from the installer section of SetupData.
     # See the comment block on _CAP_OMNI_PRO_II for layout details.
     zt_off = cap.get("zoneTypeOffset")
     zone_types: dict[int, int] = {}
@@ -444,6 +477,14 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         if zt_end <= len(setup_data):
             for slot in range(1, cap["max_zones"] + 1):
                 zone_types[slot] = setup_data[zt_off + slot - 1]
+
+    za_off = cap.get("zoneAreaOffset")
+    zone_areas: dict[int, int] = {}
+    if za_off is not None:
+        za_end = za_off + cap["max_zones"]
+        if za_end <= len(setup_data):
+            for slot in range(1, cap["max_zones"] + 1):
+                zone_areas[slot] = setup_data[za_off + slot - 1]
 
     # Object family order per clsHAC body layout:
     # Zones → Units → Buttons → Codes → Thermostats → Areas → Messages.
@@ -484,6 +525,7 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         area_names=area_names,
         message_names=message_names,
         zone_types=zone_types,
+        zone_areas=zone_areas,
     )
 
 
@@ -572,6 +614,7 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.area_names = walk.area_names
     account.message_names = walk.message_names
     account.zone_types = walk.zone_types
+    account.zone_areas = walk.zone_areas
 
     # PCA03+ continues past Connection with ModemBaud flags + nine
     # Description blocks + the Remarks table. We walk it on a
