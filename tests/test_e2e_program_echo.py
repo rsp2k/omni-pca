@@ -425,6 +425,11 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert "installer_code" not in r
     assert "pc_access_code" not in r
 
+    # Geographic configuration — northern-US install on Pacific time.
+    assert 25 <= acct.latitude <= 49      # continental US lat range
+    assert 67 <= acct.longitude <= 125    # continental US long range
+    assert acct.time_zone in (5, 6, 7, 8, 9, 10)  # US zones EST..AKST
+
     # Codes: PINs decode as BE u16. PII fields not in repr().
     assert acct.code_authority[1] == 1   # COMPUTER → User
     assert acct.code_authority[4] == 2   # Debra → Manager

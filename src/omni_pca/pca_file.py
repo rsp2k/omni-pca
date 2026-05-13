@@ -325,6 +325,15 @@ class PcaAccount:
     enable_pc_access: bool = False
     pc_access_code: int = field(default=0, repr=False)
 
+    # Panel geographic configuration — raw bytes used by the firmware
+    # to compute sunrise/sunset for time-of-day programs. No N/S/E/W
+    # modifier at this position (those live in the WorldWideLatitude
+    # feature block past DST). TimeZone is hours west of UTC on
+    # OMNI_PRO_II (7=PDT, 8=PST).
+    latitude: int = 0
+    longitude: int = 0
+    time_zone: int = 0
+
     # DST configuration (when the panel switches between DST and standard
     # time). Values are raw bytes from enuDSTMonth / enuDSTWeek:
     # 0 = Disabled, 1..12 = month, 1..7 = week (1=First Sunday, 2=Second,
@@ -428,6 +437,15 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     #   1916: DSTEndWeek    (enuDSTWeek)
     # HouseCodes.Count derives as (lastX10 - firstX10 + 1) / 16 = 16 for
     # OMNI_PRO_II (clsHouseCodes.cs:35).
+    # Three single-byte scalars sandwiched between the TimeClocks block
+    # and AnnounceAlarms (clsHAC.cs:3064-3066). Latitude / Longitude are
+    # raw degrees (no N/S/E/W modifier in this position — those live in
+    # the WorldWideLatitude feature block after DST). TimeZone is the
+    # panel's UTC offset selector; OMNI_PRO_II uses raw hours west of
+    # UTC (e.g. 7 = Pacific Daylight, 8 = Pacific Standard).
+    "latitudeOffset": 1893,
+    "longitudeOffset": 1894,
+    "timeZoneOffset": 1895,
     "perimeterChimeOffset": 1897,
     "audibleExitDelayOffset": 1905,
     "dstStartMonthOffset": 1913,
@@ -657,6 +675,9 @@ class _ConnectionWalk:
     installer_code: int = 0
     enable_pc_access: bool = False
     pc_access_code: int = 0
+    latitude: int = 0
+    longitude: int = 0
+    time_zone: int = 0
     dst_start_month: int = 0
     dst_start_week: int = 0
     dst_end_month: int = 0
@@ -780,6 +801,9 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
 
     installer_code = _read_be_u16("installerCodeOffset")
     pc_access_code = _read_be_u16("pcAccessCodeOffset")
+    latitude = _read_scalar_byte("latitudeOffset")
+    longitude = _read_scalar_byte("longitudeOffset")
+    time_zone = _read_scalar_byte("timeZoneOffset")
     epa_off = cap.get("enablePCAccessOffset")
     enable_pc_access = (
         bool(setup_data[epa_off])
@@ -964,6 +988,9 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         installer_code=installer_code,
         enable_pc_access=enable_pc_access,
         pc_access_code=pc_access_code,
+        latitude=latitude,
+        longitude=longitude,
+        time_zone=time_zone,
         dst_start_month=dst_start_month,
         dst_start_week=dst_start_week,
         dst_end_month=dst_end_month,
@@ -1078,6 +1105,9 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.installer_code = walk.installer_code
     account.enable_pc_access = walk.enable_pc_access
     account.pc_access_code = walk.pc_access_code
+    account.latitude = walk.latitude
+    account.longitude = walk.longitude
+    account.time_zone = walk.time_zone
     account.dst_start_month = walk.dst_start_month
     account.dst_start_week = walk.dst_start_week
     account.dst_end_month = walk.dst_end_month
