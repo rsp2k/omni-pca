@@ -368,14 +368,43 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     #   AutoBypass    OFF
     #   AllOnForAlarm ON
     #   TroubleBeep   OFF
+    #   PerimeterChime OFF  (homeowner disabled)
+    #   AudibleExitDelay ON
     assert acct.area_entry_chime[1] is False
     assert acct.area_quick_arm[1] is True
     assert acct.area_auto_bypass[1] is False
     assert acct.area_all_on_for_alarm[1] is True
     assert acct.area_trouble_beep[1] is False
+    assert acct.area_perimeter_chime[1] is False
+    assert acct.area_audible_exit_delay[1] is True
     # And the values flowed through MockState.
     assert state.areas[1].quick_arm is True
     assert state.areas[1].entry_chime is False
+    assert state.areas[1].perimeter_chime is False
+
+    # DST configuration — US default (Mar/2nd Sun, Nov/1st Sun).
+    assert acct.dst_start_month == 3
+    assert acct.dst_start_week == 2
+    assert acct.dst_end_month == 11
+    assert acct.dst_end_week == 1
+
+    # Unit type derivation by index range:
+    assert acct.unit_types[1] == 1       # X10 → Standard
+    assert acct.unit_types[257] == 13    # ExpEnc → Output
+    assert acct.unit_types[385] == 13    # VoltOut → Output
+    assert acct.unit_types[393] == 12    # FlagOut → Flag
+    # Unit type/areas threaded into MockUnitState — every unit is X10
+    # type 1 (the named ones in this fixture are all X10).
+    assert state.units[1].unit_type == 1
+    # Area was 0xff (panel default = "all") → normalized to 0x01 in mock.
+    assert state.units[1].areas == 0x01
+
+    # Codes: PINs decode as BE u16. PII fields not in repr().
+    assert acct.code_authority[1] == 1   # COMPUTER → User
+    assert acct.code_authority[4] == 2   # Debra → Manager
+    assert acct.code_authority[5] == 3   # Cage → Installer
+    assert 0 <= acct.code_pins[1] <= 0xFFFF
+    assert "code_pins" not in repr(acct)
     assert state.zones[1].name == "GARAGE ENTRY"
     assert state.units[1].name == "ROOM ONE"
     assert state.thermostats[1].name == "DOWNSTAIRS"

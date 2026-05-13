@@ -132,6 +132,8 @@ class MockUnitState:
     name: str = ""
     state: int = 0  # 0=off, 1=on, 100..200=brightness percent (raw Omni)
     time_remaining: int = 0
+    unit_type: int = 1  # enuOL2UnitType (1=Standard); see clsUnit.cs:928 family
+    areas: int = 0x01   # bitmask of area membership (bit 0 = area 1, ...)
 
 
 @dataclass
@@ -155,6 +157,8 @@ class MockAreaState:
     auto_bypass: bool = False
     all_on_for_alarm: bool = False
     trouble_beep: bool = False
+    perimeter_chime: bool = False
+    audible_exit_delay: bool = False
 
 
 @dataclass
@@ -347,7 +351,20 @@ class MockState:
                 )
                 for i, n in acct.zone_names.items()
             },
-            "units": {i: MockUnitState(name=n) for i, n in acct.unit_names.items()},
+            "units": {
+                i: MockUnitState(
+                    name=n,
+                    unit_type=acct.unit_types.get(i, 1),
+                    # 0xFF (uninitialised → "all areas") and 0x01 are the
+                    # two common values. If the panel doesn't have a
+                    # specific restriction, fall back to "area 1 only"
+                    # so HA's area-filtering produces sensible defaults.
+                    areas=(acct.unit_areas.get(i, 0x01) or 0x01)
+                    if acct.unit_areas.get(i, 0x01) != 0xFF
+                    else 0x01,
+                )
+                for i, n in acct.unit_names.items()
+            },
             "areas": {
                 i: MockAreaState(
                     name=acct.area_names.get(i, ""),
@@ -359,6 +376,8 @@ class MockState:
                     auto_bypass=acct.area_auto_bypass.get(i, False),
                     all_on_for_alarm=acct.area_all_on_for_alarm.get(i, False),
                     trouble_beep=acct.area_trouble_beep.get(i, False),
+                    perimeter_chime=acct.area_perimeter_chime.get(i, False),
+                    audible_exit_delay=acct.area_audible_exit_delay.get(i, False),
                 )
                 for i in sorted(in_use_areas)
             },
@@ -990,11 +1009,11 @@ class MockPanel:
                     unit.state if unit else 0,
                     (unit.time_remaining >> 8) & 0xFF if unit else 0,
                     unit.time_remaining & 0xFF if unit else 0,
-                    1,  # UnitType: Standard
+                    unit.unit_type if unit else 1,
                 ]
             )
             + self.state.unit_name_bytes(index)
-            + bytes([0, 1])  # reserved + UnitAreas (default area 1)
+            + bytes([0, (unit.areas if unit else 0x01)])
         )
         return encode_v2(OmniLink2MessageType.Properties, body)
 

@@ -261,12 +261,55 @@ class PcaAccount:
     #
     # PerimeterChime and AudibleExitDelay are NOT in this contiguous
     # block — they live deeper in the user section past FlashLightNum,
-    # HouseCodes flags, and 6 TimeClock When-structs.
+    # HouseCodes flags, and 6 TimeClock When-structs (see
+    # perimeter_chime / audible_exit_delay below).
     area_entry_chime: dict[int, bool] = field(default_factory=dict)
     area_quick_arm: dict[int, bool] = field(default_factory=dict)
     area_auto_bypass: dict[int, bool] = field(default_factory=dict)
     area_all_on_for_alarm: dict[int, bool] = field(default_factory=dict)
     area_trouble_beep: dict[int, bool] = field(default_factory=dict)
+    area_perimeter_chime: dict[int, bool] = field(default_factory=dict)
+    area_audible_exit_delay: dict[int, bool] = field(default_factory=dict)
+
+    # Per-unit type + area assignment derived from CAP index ranges and
+    # the AreaGroups arrays in SetupData. Keys are 1-based unit slots
+    # (1..numUnits). Values:
+    #   unit_types[u]: raw ``enuOL2UnitType`` byte (1=Standard for X10,
+    #     12=Flag for FlagOut, 13=Output for VoltOut/ExpEnc). The
+    #     X10 sub-types are collapsed to Standard — deriving the
+    #     specific HouseCodeFormat would require the EnableExtCode
+    #     table which we don't decode yet.
+    #   unit_areas[u]: 8-bit area-membership bitmask. 0xFF is the panel
+    #     default ("all areas") when no specific restriction is set;
+    #     0x01 means "area 1 only".
+    unit_types: dict[int, int] = field(default_factory=dict)
+    unit_areas: dict[int, int] = field(default_factory=dict)
+
+    # User codes (PIN database). 99 entries on OMNI_PRO_II.
+    #
+    # ``code_pins`` is the raw 16-bit value stored on disk (BE u16) —
+    # plain 4-digit PINs decode as decimal 0..9999, but the live fixture
+    # has some entries with values >9999 whose format isn't yet
+    # determined (possibly scrambled, possibly card-credential format,
+    # possibly partial-byte flags). Treat as opaque pending RE.
+    #
+    # ``code_pins`` is marked ``repr=False`` so a debug ``print(acct)``
+    # never leaks PIN material into logs. ``code_authority`` is the
+    # enuCodeAuthority byte (0=Disabled, 1=User, 2=Manager, 3=Installer)
+    # and ``code_areas`` is the area-membership bitmask (0xFF = all).
+    code_pins: dict[int, int] = field(default_factory=dict, repr=False)
+    code_authority: dict[int, int] = field(default_factory=dict)
+    code_areas: dict[int, int] = field(default_factory=dict)
+
+    # DST configuration (when the panel switches between DST and standard
+    # time). Values are raw bytes from enuDSTMonth / enuDSTWeek:
+    # 0 = Disabled, 1..12 = month, 1..7 = week (1=First Sunday, 2=Second,
+    # 3=Third, 4=Fourth, 5=Last, 6=Next to Last, 7=Third from Last).
+    # US default after 2007: Mar/Second, Nov/First.
+    dst_start_month: int = 0
+    dst_start_week: int = 0
+    dst_end_month: int = 0
+    dst_end_week: int = 0
 
     # Panel-wide TempFormat (enuTempFormat: 1=Fahrenheit, 2=Celsius)
     # and NumAreasUsed (count of armable security areas — 1 for a
@@ -327,6 +370,16 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     #   1771..1778: Areas[1..8].EntryDelay (8 bytes)
     #   1779..1786: Areas[1..8].ExitDelay (8 bytes)
     #
+    # Codes block: 99 entries × 14 bytes at offset 383.
+    # Per-entry layout (clsHAC.cs:3001-3009):
+    #   bytes 0..1: PIN (BE u16, clsHardwareArray.ReadUInt16)
+    #   byte 2:     Authority (enuCodeAuthority: 0=Disabled, 1=User,
+    #               2=Manager, 3=Installer)
+    #   byte 3:     Areas bitmask
+    #   bytes 4..8: WhenOn (clsWhen)
+    #   bytes 9..13: WhenOff (clsWhen)
+    "codesOffset": 383,
+    "codeEntryBytes": 14,
     "entryDelayOffset": 1771,
     "exitDelayOffset": 1779,
     # Five contiguous bool[8] flag arrays immediately follow ExitDelay
@@ -338,6 +391,25 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     "autoBypassOffset": 1803,
     "allOnForAlarmOffset": 1811,
     "troubleBeepOffset": 1819,
+    # After TroubleBeep the user section continues with HighSecurity (1),
+    # FreezeAlarm (1), FlashLightNum_HI+LO (2; lastX10>255), HouseCodes
+    # EnableAllOff[16] (16), EnableAllOn[16] (16), 6×clsWhen (30),
+    # Latitude+Longitude+TimeZone (3), AnnounceAlarms (1) — 70 bytes —
+    # then the two remaining area bool[8] flags and DST scalars:
+    #   1897..1904: PerimeterChime[1..8]
+    #   1905..1912: AudibleExitDelay[1..8]
+    #   1913: DSTStartMonth (enuDSTMonth)
+    #   1914: DSTStartWeek  (enuDSTWeek)
+    #   1915: DSTEndMonth   (enuDSTMonth)
+    #   1916: DSTEndWeek    (enuDSTWeek)
+    # HouseCodes.Count derives as (lastX10 - firstX10 + 1) / 16 = 16 for
+    # OMNI_PRO_II (clsHouseCodes.cs:35).
+    "perimeterChimeOffset": 1897,
+    "audibleExitDelayOffset": 1905,
+    "dstStartMonthOffset": 1913,
+    "dstStartWeekOffset": 1914,
+    "dstEndMonthOffset": 1915,
+    "dstEndWeekOffset": 1916,
 
     # Installer section begins at byte 2560 (clsCapOMNI_PRO_II.instSetupStart).
     # Layout for OMNI_PRO_II observed empirically against the live fixture
@@ -377,7 +449,18 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     "zoneTypeOffset": 2572,
     "tempFormatOffset": 2993,
     "numAreasUsedOffset": 3034,
+    # AreaGroups arrays per family — each byte is an 8-bit area-membership
+    # bitmask covering one or more units, sized via the CAP ranges:
+    "x10AreaGroupsOffset": 3035,      # (lastX10-firstX10+16)/16 = 16 bytes, 1 group/16 units
+    "voltOutAreaGroupsOffset": 3051,  # lastVoltOut-firstVoltOut+1 = 8 bytes, 1 byte/unit
+    "flagOutAreaGroupsOffset": 3059,  # (lastFlagOut-firstFlagOut+8)/8 = 15 bytes, 1 group/8 flags
+    "expEncAreaGroupsOffset": 3074,   # (lastExpEncOut-firstExpEncOut+4)/4 = 32 bytes, 1 group/4 outputs
     "zoneAreaOffset": 3106,
+    # Unit index ranges → unit type derivation. Per CAP for OMNI_PRO_II:
+    "firstX10": 1, "lastX10": 256,
+    "firstExpEncOut": 257, "lastExpEncOut": 384,
+    "firstVoltOut": 385, "lastVoltOut": 392,
+    "firstFlagOut": 393, "lastFlagOut": 511,
     "max_zones": 176, "lenZoneName": 15, "zones_count": 176,
     "max_units": 512, "lenUnitName": 12, "units_count": 511,
     "max_buttons": 128, "lenButtonName": 12, "buttons_count": 255,
@@ -499,6 +582,17 @@ class _ConnectionWalk:
     area_auto_bypass: dict[int, bool] = field(default_factory=dict)
     area_all_on_for_alarm: dict[int, bool] = field(default_factory=dict)
     area_trouble_beep: dict[int, bool] = field(default_factory=dict)
+    area_perimeter_chime: dict[int, bool] = field(default_factory=dict)
+    area_audible_exit_delay: dict[int, bool] = field(default_factory=dict)
+    unit_types: dict[int, int] = field(default_factory=dict)
+    unit_areas: dict[int, int] = field(default_factory=dict)
+    code_pins: dict[int, int] = field(default_factory=dict, repr=False)
+    code_authority: dict[int, int] = field(default_factory=dict)
+    code_areas: dict[int, int] = field(default_factory=dict)
+    dst_start_month: int = 0
+    dst_start_week: int = 0
+    dst_end_month: int = 0
+    dst_end_week: int = 0
     temp_format: int = 0
     num_areas_used: int = 0
 
@@ -573,6 +667,94 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
     area_auto_bypass = _read_area_bool_array("autoBypassOffset")
     area_all_on_for_alarm = _read_area_bool_array("allOnForAlarmOffset")
     area_trouble_beep = _read_area_bool_array("troubleBeepOffset")
+    area_perimeter_chime = _read_area_bool_array("perimeterChimeOffset")
+    area_audible_exit_delay = _read_area_bool_array("audibleExitDelayOffset")
+
+    def _read_scalar_byte(offset_key: str) -> int:
+        off = cap.get(offset_key)
+        if off is None or off >= len(setup_data):
+            return 0
+        return setup_data[off]
+
+    dst_start_month = _read_scalar_byte("dstStartMonthOffset")
+    dst_start_week = _read_scalar_byte("dstStartWeekOffset")
+    dst_end_month = _read_scalar_byte("dstEndMonthOffset")
+    dst_end_week = _read_scalar_byte("dstEndWeekOffset")
+
+    # Unit type + area assignment, per unit index.
+    #
+    # Unit *type* is derived from which CAP range the index falls in
+    # (clsUnit.CalculateUnitType + the AreaGroups read in
+    # clsHAC._ParseSetupData at clsHAC.cs:3242-3289). We collapse the
+    # X10 sub-types (Standard/Extended/HLC/UPB/ZWave/…) to
+    # enuOL2UnitType.Standard=1 since deriving them requires the
+    # HouseCodes EnableExtCode table; non-X10 families resolve to
+    # Output=13 (Voltage/ExpEnc) or Flag=12.
+    #
+    # Unit *area* is the bitmask byte from the AreaGroups array of the
+    # appropriate family, indexed by the unit's group:
+    #   X10:     group = (Number - firstX10) // 16
+    #   VoltOut: group = (Number - firstVoltOut)                  (1 byte/unit)
+    #   FlagOut: group = (Number - firstFlagOut) // 8
+    #   ExpEnc:  group = (Number - firstExpEncOut) // 4
+    # Byte 0xFF (panel default, uninitialised) is reported verbatim —
+    # consumers treat that as "all areas".
+    def _read_area_group(group_off_key: str, group_idx: int) -> int:
+        off = cap.get(group_off_key)
+        if off is None:
+            return 0xFF
+        pos = off + group_idx
+        if pos >= len(setup_data):
+            return 0xFF
+        return setup_data[pos]
+
+    # Codes block — extract PINs (raw BE u16), authority byte, areas
+    # bitmask. PINs are PII; we expose the raw value but don't print it
+    # in any repr (PcaAccount uses repr=False on these fields).
+    codes_off = cap.get("codesOffset")
+    code_bytes = cap.get("codeEntryBytes", 14)
+    num_codes = cap.get("max_codes", 0)
+    code_pins: dict[int, int] = {}
+    code_authority: dict[int, int] = {}
+    code_areas: dict[int, int] = {}
+    if codes_off is not None:
+        for k in range(1, num_codes + 1):
+            base = codes_off + (k - 1) * code_bytes
+            if base + 4 > len(setup_data):
+                break
+            # BE u16 (clsHardwareArray.ReadUInt16)
+            code_pins[k] = (setup_data[base] << 8) | setup_data[base + 1]
+            code_authority[k] = setup_data[base + 2]
+            code_areas[k] = setup_data[base + 3]
+
+    unit_types: dict[int, int] = {}
+    unit_areas: dict[int, int] = {}
+    f_x10, l_x10 = cap.get("firstX10", 0), cap.get("lastX10", 0)
+    f_vo, l_vo = cap.get("firstVoltOut", 0), cap.get("lastVoltOut", 0)
+    f_fo, l_fo = cap.get("firstFlagOut", 0), cap.get("lastFlagOut", 0)
+    f_ee, l_ee = cap.get("firstExpEncOut", 0), cap.get("lastExpEncOut", 0)
+    max_units = cap.get("max_units", 0)
+    for u in range(1, max_units + 1):
+        if f_x10 and f_x10 <= u <= l_x10:
+            unit_types[u] = 1  # enuOL2UnitType.Standard (collapsed X10 default)
+            unit_areas[u] = _read_area_group(
+                "x10AreaGroupsOffset", (u - f_x10) // 16
+            )
+        elif f_ee and f_ee <= u <= l_ee:
+            unit_types[u] = 13  # enuOL2UnitType.Output
+            unit_areas[u] = _read_area_group(
+                "expEncAreaGroupsOffset", (u - f_ee) // 4
+            )
+        elif f_vo and f_vo <= u <= l_vo:
+            unit_types[u] = 13  # enuOL2UnitType.Output
+            unit_areas[u] = _read_area_group(
+                "voltOutAreaGroupsOffset", u - f_vo
+            )
+        elif f_fo and f_fo <= u <= l_fo:
+            unit_types[u] = 12  # enuOL2UnitType.Flag
+            unit_areas[u] = _read_area_group(
+                "flagOutAreaGroupsOffset", (u - f_fo) // 8
+            )
 
     # Scalars from the installer section.
     tf_off = cap.get("tempFormatOffset")
@@ -627,6 +809,17 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         area_auto_bypass=area_auto_bypass,
         area_all_on_for_alarm=area_all_on_for_alarm,
         area_trouble_beep=area_trouble_beep,
+        area_perimeter_chime=area_perimeter_chime,
+        area_audible_exit_delay=area_audible_exit_delay,
+        unit_types=unit_types,
+        unit_areas=unit_areas,
+        code_pins=code_pins,
+        code_authority=code_authority,
+        code_areas=code_areas,
+        dst_start_month=dst_start_month,
+        dst_start_week=dst_start_week,
+        dst_end_month=dst_end_month,
+        dst_end_week=dst_end_week,
         temp_format=temp_format,
         num_areas_used=num_areas_used,
     )
@@ -725,6 +918,17 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.area_auto_bypass = walk.area_auto_bypass
     account.area_all_on_for_alarm = walk.area_all_on_for_alarm
     account.area_trouble_beep = walk.area_trouble_beep
+    account.area_perimeter_chime = walk.area_perimeter_chime
+    account.area_audible_exit_delay = walk.area_audible_exit_delay
+    account.unit_types = walk.unit_types
+    account.unit_areas = walk.unit_areas
+    account.code_pins = walk.code_pins
+    account.code_authority = walk.code_authority
+    account.code_areas = walk.code_areas
+    account.dst_start_month = walk.dst_start_month
+    account.dst_start_week = walk.dst_start_week
+    account.dst_end_month = walk.dst_end_month
+    account.dst_end_week = walk.dst_end_week
     account.temp_format = walk.temp_format
     account.num_areas_used = walk.num_areas_used
 
