@@ -64,6 +64,26 @@ def _short_scan_interval(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def populated_state() -> MockState:
     """A lightly-populated mock state covering every entity platform."""
+    from omni_pca.programs import Days, Program, ProgramType
+    programs = {
+        slot: prog.encode_wire_bytes()
+        for slot, prog in {
+            12: Program(
+                slot=12, prog_type=int(ProgramType.TIMED),
+                cmd=3, hour=6, minute=0,
+                days=int(Days.MONDAY | Days.FRIDAY),
+            ),
+            42: Program(
+                slot=42, prog_type=int(ProgramType.TIMED),
+                cmd=4, hour=22, minute=30,
+                days=int(Days.SUNDAY),
+            ),
+            99: Program(
+                slot=99, prog_type=int(ProgramType.EVENT),
+                cmd=5, month=5, day=12,
+            ),
+        }.items()
+    }
     return MockState(
         zones={
             1: MockZoneState(name="FRONT_DOOR"),
@@ -84,6 +104,7 @@ def populated_state() -> MockState:
             1: MockButtonState(name="GOOD_MORNING"),
         },
         user_codes={1: 1234},
+        programs=programs,
     )
 
 

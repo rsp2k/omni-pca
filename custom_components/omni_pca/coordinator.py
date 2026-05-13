@@ -62,7 +62,6 @@ from omni_pca.models import (
     AreaStatus,
     ButtonProperties,
     ObjectType,
-    ProgramProperties,
     SystemInformation,
     SystemStatus,
     ThermostatProperties,
@@ -73,6 +72,7 @@ from omni_pca.models import (
     ZoneStatus,
 )
 from omni_pca.opcodes import OmniLink2MessageType
+from omni_pca.programs import Program
 
 from .const import (
     DOMAIN,
@@ -108,7 +108,7 @@ class OmniData:
     areas: dict[int, AreaProperties] = field(default_factory=dict)
     thermostats: dict[int, ThermostatProperties] = field(default_factory=dict)
     buttons: dict[int, ButtonProperties] = field(default_factory=dict)
-    programs: dict[int, ProgramProperties] = field(default_factory=dict)
+    programs: dict[int, Program] = field(default_factory=dict)
 
     zone_status: dict[int, ZoneStatus] = field(default_factory=dict)
     unit_status: dict[int, UnitStatus] = field(default_factory=dict)
@@ -382,15 +382,32 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
 
     async def _discover_programs(
         self, client: OmniClient
-    ) -> dict[int, ProgramProperties]:
-        # Programs aren't reachable via the Properties opcode (the C# side
-        # uses a separate request/reply pair), so we just return an empty
-        # dict. We keep the field on OmniData so Phase B can plug in real
-        # discovery the moment the library exposes it. AMBIGUITY: the spec
-        # asks for "named programs" — there's no on-the-wire path for that
-        # in v1.0 of omni_pca, so an empty mapping is the honest answer.
-        _ = client, ProgramProperties
-        return {}
+    ) -> dict[int, Program]:
+        """Enumerate defined panel programs via the appropriate wire path.
+
+        * v2 (TCP): ``client.iter_programs()`` drives UploadProgram with
+          request_reason=1 ("next defined after slot"), stopping at EOD.
+        * v1 (UDP): the adapter forwards to OmniClientV1.iter_programs(),
+          which is a bare UploadPrograms stream ack-walked to EOD.
+
+        Both surfaces yield :class:`omni_pca.programs.Program` and skip
+        empty slots, so the resulting dict only carries defined programs.
+        Errors during enumeration are logged and swallowed — programs
+        are a non-critical part of discovery, so a partial list is better
+        than blocking the entry setup.
+        """
+        out: dict[int, Program] = {}
+        try:
+            async for prog in client.iter_programs():
+                if prog.slot is not None:
+                    out[prog.slot] = prog
+        except (OmniConnectionError, RequestTimeoutError):
+            raise
+        except Exception:
+            LOGGER.debug(
+                "program enumeration interrupted (kept %d)", len(out), exc_info=True
+            )
+        return out
 
     async def _walk_properties(
         self,

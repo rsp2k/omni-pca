@@ -69,6 +69,7 @@ async def async_setup_entry(
 
     entities.append(OmniSystemModelSensor(coordinator))
     entities.append(OmniLastEventSensor(coordinator))
+    entities.append(OmniProgramsSensor(coordinator))
 
     async_add_entities(entities)
 
@@ -261,3 +262,55 @@ class OmniLastEventSensor(
             if hasattr(ev, key):
                 result[key] = getattr(ev, key)
         return result
+
+
+class OmniProgramsSensor(
+    CoordinatorEntity[OmniDataUpdateCoordinator], SensorEntity
+):
+    """Diagnostic sensor exposing the panel's automation programs.
+
+    State value is the count of defined programs. The ``programs``
+    attribute carries a list of per-program summaries — a stable,
+    JSON-serializable view automations and template sensors can read.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: OmniDataUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.unique_id}-programs"
+        self._attr_name = "Panel Programs"
+        self._attr_device_info = coordinator.device_info
+
+    @property
+    def native_value(self) -> int:
+        return len(self.coordinator.data.programs)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        from omni_pca.programs import ProgramType
+
+        summaries: list[dict[str, Any]] = []
+        for slot in sorted(self.coordinator.data.programs):
+            p = self.coordinator.data.programs[slot]
+            try:
+                type_name = ProgramType(p.prog_type).name
+            except ValueError:
+                type_name = f"UNKNOWN({p.prog_type})"
+            summaries.append(
+                {
+                    "slot": slot,
+                    "type": type_name,
+                    "cmd": p.cmd,
+                    "par": p.par,
+                    "pr2": p.pr2,
+                    "month": p.month,
+                    "day": p.day,
+                    "days": p.days,
+                    "hour": p.hour,
+                    "minute": p.minute,
+                }
+            )
+        return {"programs": summaries}

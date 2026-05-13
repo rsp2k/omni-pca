@@ -78,6 +78,35 @@ async def test_button_entity_for_panel_button(
     assert len(states) == 1
 
 
+async def test_programs_sensor_reflects_seeded_panel(
+    hass: HomeAssistant, configured_panel
+) -> None:
+    """The diagnostic Panel Programs sensor enumerates discovered programs.
+
+    Mock seed has 3 programs at slots 12 / 42 / 99 (see
+    :func:`populated_state`); after discovery the coordinator stashes them
+    on ``OmniData.programs`` and the sensor surfaces a count + per-slot
+    summary attribute.
+    """
+    programs_states = [
+        s for s in hass.states.async_all("sensor")
+        if s.entity_id.endswith("_panel_programs") or "panel_programs" in s.entity_id
+    ]
+    assert len(programs_states) == 1, (
+        f"expected one panel_programs sensor, got {[s.entity_id for s in programs_states]}"
+    )
+    s = programs_states[0]
+    assert int(s.state) == 3
+    summaries = s.attributes["programs"]
+    assert [p["slot"] for p in summaries] == [12, 42, 99]
+    # Spot-check the per-record fields landed in summary form.
+    by_slot = {p["slot"]: p for p in summaries}
+    assert by_slot[12]["type"] == "TIMED"
+    assert by_slot[12]["hour"] == 6 and by_slot[12]["minute"] == 0
+    assert by_slot[99]["type"] == "EVENT"
+    assert by_slot[99]["month"] == 5 and by_slot[99]["day"] == 12
+
+
 async def test_event_entity_per_panel(
     hass: HomeAssistant, configured_panel
 ) -> None:

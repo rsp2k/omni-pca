@@ -172,6 +172,16 @@ class OmniClientV1Adapter:
     async def list_message_names(self) -> dict[int, str]:
         return (await self._ensure_names()).get(7, {})  # NameType.MESSAGE
 
+    # ---- programs ------------------------------------------------------
+
+    def iter_programs(self):
+        """Forward to OmniClientV1.iter_programs (streaming UploadPrograms).
+
+        Same async-iterator shape as :meth:`OmniClient.iter_programs` so the
+        coordinator does not need a transport branch.
+        """
+        return self._client.iter_programs()
+
     # ---- properties synthesis ------------------------------------------
 
     async def get_object_properties(
