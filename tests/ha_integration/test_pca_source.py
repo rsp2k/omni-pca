@@ -153,6 +153,15 @@ async def test_mockpanel_from_pca_drives_full_ha_discovery(
             assert len(coordinator.data.thermostats) == 2
             # And the programs sensor reflects 330 from wire iter_programs.
             assert len(coordinator.data.programs) == 330
+            # Zone types flowed from SetupData → mock → wire Properties
+            # reply → HA's ZoneProperties parser.
+            zone_types_by_slot = {
+                idx: z.zone_type for idx, z in coordinator.data.zones.items()
+            }
+            assert zone_types_by_slot[1] == 0x00     # GARAGE ENTRY → EntryExit
+            assert zone_types_by_slot[3] == 0x01     # BACK DOOR → Perimeter
+            assert zone_types_by_slot[7] == 0x03     # LIVINGROOM MOT → AwayInt
+            assert zone_types_by_slot[11] == 0x55    # OUTSIDE TEMP → outdoor temp
         finally:
             await hass.config_entries.async_unload(entry.entry_id)
             await hass.async_block_till_done()

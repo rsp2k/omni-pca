@@ -217,9 +217,9 @@ class PcaAccount:
     # Per-object name tables — populated from the Names block between
     # SetupData and Voices. Keys are 1-based slot numbers; empty slots
     # are omitted entirely (the panel stores them as length-0 String8
-    # blobs, which we filter at read time). Properties beyond the name
-    # (zone_type, area assignment, thermostat type, etc.) live in
-    # SetupData and aren't extracted yet.
+    # blobs, which we filter at read time). Other object properties
+    # come from the SetupData block (see ``zone_types`` for the first
+    # such field extracted).
     zone_names: dict[int, str] = field(default_factory=dict)
     unit_names: dict[int, str] = field(default_factory=dict)
     button_names: dict[int, str] = field(default_factory=dict)
@@ -227,6 +227,14 @@ class PcaAccount:
     thermostat_names: dict[int, str] = field(default_factory=dict)
     area_names: dict[int, str] = field(default_factory=dict)
     message_names: dict[int, str] = field(default_factory=dict)
+
+    # Zone types from SetupData installer section. Keys are 1-based slot
+    # numbers (always 1..numZones); values are raw ``enuZoneType`` byte
+    # values — see ``enuZoneType.cs`` for the full enum. Common values:
+    # 0x00=EntryExit, 0x01=Perimeter, 0x03=AwayInt, 0x40=Auxiliary (the
+    # panel default for unused slots), 0x55=Extended_Range_OutdoorTemp.
+    # Empty dict when SetupData wasn't walked successfully.
+    zone_types: dict[int, int] = field(default_factory=dict)
 
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
@@ -267,6 +275,17 @@ def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
 # correct totals up to that block, and OMNI_PRO_II is the working reference.
 _CAP_OMNI_PRO_II: dict[str, int] = {
     "lenSetupData": 3840,
+    # Installer section begins at byte 2560 (clsCapOMNI_PRO_II.instSetupStart).
+    # Layout for OMNI_PRO_II observed empirically against the live fixture:
+    #   offset 2560: HouseCode (1 byte)
+    #   offsets 2561..2569: OutputType[0..8] (9 bytes; numVoltOutputs)
+    #   offset 2570: ZoneExpansions (1 byte; ZoneExpansions feature)
+    #   offset 2571: NumExpEnc (1 byte; firstExpEncOut != 0)
+    #   offsets 2572..2747: ZoneType[1..176] (176 bytes; enuZoneType per zone)
+    # The trailing 12 bytes from 2560..2571 are the preamble. Hardcoded
+    # for OMNI_PRO_II — other panels will need their own constants.
+    "instSetupStart": 2560,
+    "zoneTypeOffset": 2572,
     "max_zones": 176, "lenZoneName": 15, "zones_count": 176,
     "max_units": 512, "lenUnitName": 12, "units_count": 511,
     "max_buttons": 128, "lenButtonName": 12, "buttons_count": 255,
@@ -363,10 +382,12 @@ def _walk_to_remarks(r: PcaReader) -> dict[int, str]:
 class _ConnectionWalk:
     """Side-channel output of :func:`_walk_to_connection`.
 
-    Captures the per-object name tables on the way past so the caller
-    can attach them to :class:`PcaAccount`. Each ``*_names`` dict is
-    ``{1-based slot: name}`` with only non-empty slots present —
-    matches the "iter_defined" convention used for programs.
+    Captures the per-object name tables + selected SetupData fields on
+    the way past so the caller can attach them to :class:`PcaAccount`.
+    Each ``*_names`` dict is ``{1-based slot: name}`` with only non-empty
+    slots present — matches the "iter_defined" convention used for
+    programs. ``zone_types`` is ``{1-based slot: enuZoneType byte}`` for
+    every zone slot (defined or not — the array is fixed-size).
     """
 
     programs_blob: bytes
@@ -377,6 +398,7 @@ class _ConnectionWalk:
     thermostat_names: dict[int, str] = field(default_factory=dict)
     area_names: dict[int, str] = field(default_factory=dict)
     message_names: dict[int, str] = field(default_factory=dict)
+    zone_types: dict[int, int] = field(default_factory=dict)
 
 
 def _read_name_table(r: PcaReader, count: int, name_len: int) -> dict[int, str]:
@@ -406,9 +428,22 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
     Mirrors clsHAC.cs:7995-8044. The per-object names are read via
     clsAbstractNamedItem.ReadName → String8(L) — see
     :func:`_read_name_table` for the per-slot layout.
+
+    SetupData is captured to a buffer up-front so we can index into its
+    installer section for ZoneType (offset 2572 on OMNI_PRO_II).
     """
-    r.bytes_(cap["lenSetupData"])
+    setup_data = r.bytes_(cap["lenSetupData"])
     r.bytes_(10)  # bool + bool + u16 + u16 + u32
+
+    # Pull ZoneType from the installer section of SetupData.
+    # See the comment block on _CAP_OMNI_PRO_II for layout details.
+    zt_off = cap.get("zoneTypeOffset")
+    zone_types: dict[int, int] = {}
+    if zt_off is not None:
+        zt_end = zt_off + cap["max_zones"]
+        if zt_end <= len(setup_data):
+            for slot in range(1, cap["max_zones"] + 1):
+                zone_types[slot] = setup_data[zt_off + slot - 1]
 
     # Object family order per clsHAC body layout:
     # Zones → Units → Buttons → Codes → Thermostats → Areas → Messages.
@@ -448,6 +483,7 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         thermostat_names=thermostat_names,
         area_names=area_names,
         message_names=message_names,
+        zone_types=zone_types,
     )
 
 
@@ -535,6 +571,7 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.thermostat_names = walk.thermostat_names
     account.area_names = walk.area_names
     account.message_names = walk.message_names
+    account.zone_types = walk.zone_types
 
     # PCA03+ continues past Connection with ModemBaud flags + nine
     # Description blocks + the Remarks table. We walk it on a

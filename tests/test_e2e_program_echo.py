@@ -350,6 +350,14 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert state.zones[1].name == "GARAGE ENTRY"
     assert state.units[1].name == "ROOM ONE"
     assert state.thermostats[1].name == "DOWNSTAIRS"
+    # Zone types from SetupData — door zones are EntryExit (0) or
+    # Perimeter (1), motion sensors are AwayInt (3), the OUTSIDE TEMP
+    # zone is Extended_Range_OutdoorTemp (0x55).
+    assert state.zones[1].zone_type == 0x00     # GARAGE ENTRY → EntryExit
+    assert state.zones[2].zone_type == 0x00     # FRONT DOOR → EntryExit
+    assert state.zones[3].zone_type == 0x01     # BACK DOOR → Perimeter
+    assert state.zones[7].zone_type == 0x03     # LIVINGROOM MOT → AwayInt
+    assert state.zones[11].zone_type == 0x55    # OUTSIDE TEMP → outdoor temp
 
     panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
     async with panel.serve(transport="tcp") as (host, port):

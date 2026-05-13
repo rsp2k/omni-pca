@@ -156,6 +156,8 @@ class MockZoneState:
     arming_state: int = 0   # 0=disarmed, 16=armed, 32=bypassed, 48=auto-bypassed
     is_bypassed: bool = False
     loop: int = 0           # analog loop reading
+    zone_type: int = 0      # raw enuZoneType byte (0=EntryExit default)
+    area: int = 1           # 1-based area assignment
 
     @property
     def status_byte(self) -> int:
@@ -283,11 +285,14 @@ class MockState:
           table, encoded back to wire bytes so UploadProgram /
           UploadPrograms serve them exactly as a real panel would.
         * ``zones`` / ``units`` / ``areas`` / ``thermostats`` / ``buttons``
-          — populated with the names from the .pca's Names section. Each
-          entry is a ``MockZoneState`` / ``MockUnitState`` / etc. with
-          only ``name`` set; other fields (zone_type, area assignment,
-          thermostat type, …) default to 0 because those properties live
-          in SetupData, which we don't decode yet.
+          — populated with the names from the .pca's Names section.
+          ``MockZoneState`` entries additionally carry ``zone_type``
+          (the raw ``enuZoneType`` byte from the SetupData installer
+          section), so the mock's Properties replies categorise zones
+          as security / temperature / humidity matching the source
+          panel. Other SetupData-resident fields (per-zone area
+          assignment, unit type, thermostat type, exit/entry delays,
+          options bitmasks) aren't extracted yet — those default to 0.
 
         ``user_codes`` is not seeded — the .pca only stores code *names*,
         not the PIN values; the panel keeps PINs in SetupData. Override
@@ -315,7 +320,13 @@ class MockState:
             "firmware_minor": acct.firmware_minor,
             "firmware_revision": acct.firmware_revision,
             "programs": programs,
-            "zones": {i: MockZoneState(name=n) for i, n in acct.zone_names.items()},
+            "zones": {
+                i: MockZoneState(
+                    name=n,
+                    zone_type=acct.zone_types.get(i, 0),
+                )
+                for i, n in acct.zone_names.items()
+            },
             "units": {i: MockUnitState(name=n) for i, n in acct.unit_names.items()},
             "areas": {i: MockAreaState(name=n) for i, n in acct.area_names.items()},
             "thermostats": {
@@ -922,9 +933,9 @@ class MockPanel:
                     index & 0xFF,
                     zone.status_byte if zone else 0,
                     zone.loop if zone else 0,
-                    0,  # Type: EntryExit
-                    1,  # Area: default to area 1
-                    0,  # Options
+                    zone.zone_type if zone else 0,
+                    zone.area if zone else 1,
+                    0,  # Options (not yet sourced from SetupData)
                 ]
             )
             + self.state.zone_name_bytes(index)
