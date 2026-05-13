@@ -249,6 +249,25 @@ class PcaAccount:
     area_entry_delays: dict[int, int] = field(default_factory=dict)
     area_exit_delays: dict[int, int] = field(default_factory=dict)
 
+    # Per-area boolean configuration flags from SetupData user section,
+    # five contiguous bool[8] arrays at offset 1787..1826
+    # (clsHAC.cs:3020-3038). Keys are 1-based area numbers.
+    #
+    #   entry_chime      — chime keypads when entry-delay zones trip
+    #   quick_arm        — allow arming without a code
+    #   auto_bypass      — silently bypass not-ready zones on arm
+    #   all_on_for_alarm — fire every output when any alarm trips
+    #   trouble_beep     — beep keypads on a non-alarm trouble condition
+    #
+    # PerimeterChime and AudibleExitDelay are NOT in this contiguous
+    # block — they live deeper in the user section past FlashLightNum,
+    # HouseCodes flags, and 6 TimeClock When-structs.
+    area_entry_chime: dict[int, bool] = field(default_factory=dict)
+    area_quick_arm: dict[int, bool] = field(default_factory=dict)
+    area_auto_bypass: dict[int, bool] = field(default_factory=dict)
+    area_all_on_for_alarm: dict[int, bool] = field(default_factory=dict)
+    area_trouble_beep: dict[int, bool] = field(default_factory=dict)
+
     # Panel-wide TempFormat (enuTempFormat: 1=Fahrenheit, 2=Celsius)
     # and NumAreasUsed (count of armable security areas — 1 for a
     # typical single-area home install, up to numAreas=8 on Omni Pro II).
@@ -310,6 +329,15 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     #
     "entryDelayOffset": 1771,
     "exitDelayOffset": 1779,
+    # Five contiguous bool[8] flag arrays immediately follow ExitDelay
+    # (clsHAC.cs:3020-3038). PerimeterChime and AudibleExitDelay are
+    # NOT contiguous — they live later, past HighSecurity, FreezeAlarm,
+    # FlashLightNum, HouseCodes flags, and 6 TimeClock When-structs.
+    "entryChimeOffset": 1787,
+    "quickArmOffset": 1795,
+    "autoBypassOffset": 1803,
+    "allOnForAlarmOffset": 1811,
+    "troubleBeepOffset": 1819,
 
     # Installer section begins at byte 2560 (clsCapOMNI_PRO_II.instSetupStart).
     # Layout for OMNI_PRO_II observed empirically against the live fixture
@@ -466,6 +494,11 @@ class _ConnectionWalk:
     zone_areas: dict[int, int] = field(default_factory=dict)
     area_entry_delays: dict[int, int] = field(default_factory=dict)
     area_exit_delays: dict[int, int] = field(default_factory=dict)
+    area_entry_chime: dict[int, bool] = field(default_factory=dict)
+    area_quick_arm: dict[int, bool] = field(default_factory=dict)
+    area_auto_bypass: dict[int, bool] = field(default_factory=dict)
+    area_all_on_for_alarm: dict[int, bool] = field(default_factory=dict)
+    area_trouble_beep: dict[int, bool] = field(default_factory=dict)
     temp_format: int = 0
     num_areas_used: int = 0
 
@@ -524,17 +557,22 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
 
     # Per-area entry/exit delays from the user section.
     num_areas = cap.get("max_areas", 0)
-    entry_off = cap.get("entryDelayOffset")
-    area_entry_delays: dict[int, int] = {}
-    if entry_off is not None and entry_off + num_areas <= len(setup_data):
-        for slot in range(1, num_areas + 1):
-            area_entry_delays[slot] = setup_data[entry_off + slot - 1]
+    def _read_area_byte_array(offset_key: str) -> dict[int, int]:
+        off = cap.get(offset_key)
+        if off is None or off + num_areas > len(setup_data):
+            return {}
+        return {i: setup_data[off + i - 1] for i in range(1, num_areas + 1)}
 
-    exit_off = cap.get("exitDelayOffset")
-    area_exit_delays: dict[int, int] = {}
-    if exit_off is not None and exit_off + num_areas <= len(setup_data):
-        for slot in range(1, num_areas + 1):
-            area_exit_delays[slot] = setup_data[exit_off + slot - 1]
+    def _read_area_bool_array(offset_key: str) -> dict[int, bool]:
+        return {i: bool(b) for i, b in _read_area_byte_array(offset_key).items()}
+
+    area_entry_delays = _read_area_byte_array("entryDelayOffset")
+    area_exit_delays = _read_area_byte_array("exitDelayOffset")
+    area_entry_chime = _read_area_bool_array("entryChimeOffset")
+    area_quick_arm = _read_area_bool_array("quickArmOffset")
+    area_auto_bypass = _read_area_bool_array("autoBypassOffset")
+    area_all_on_for_alarm = _read_area_bool_array("allOnForAlarmOffset")
+    area_trouble_beep = _read_area_bool_array("troubleBeepOffset")
 
     # Scalars from the installer section.
     tf_off = cap.get("tempFormatOffset")
@@ -584,6 +622,11 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         zone_areas=zone_areas,
         area_entry_delays=area_entry_delays,
         area_exit_delays=area_exit_delays,
+        area_entry_chime=area_entry_chime,
+        area_quick_arm=area_quick_arm,
+        area_auto_bypass=area_auto_bypass,
+        area_all_on_for_alarm=area_all_on_for_alarm,
+        area_trouble_beep=area_trouble_beep,
         temp_format=temp_format,
         num_areas_used=num_areas_used,
     )
@@ -677,6 +720,11 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.zone_areas = walk.zone_areas
     account.area_entry_delays = walk.area_entry_delays
     account.area_exit_delays = walk.area_exit_delays
+    account.area_entry_chime = walk.area_entry_chime
+    account.area_quick_arm = walk.area_quick_arm
+    account.area_auto_bypass = walk.area_auto_bypass
+    account.area_all_on_for_alarm = walk.area_all_on_for_alarm
+    account.area_trouble_beep = walk.area_trouble_beep
     account.temp_format = walk.temp_format
     account.num_areas_used = walk.num_areas_used
 

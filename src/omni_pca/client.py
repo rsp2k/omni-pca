@@ -730,10 +730,22 @@ class OmniClient:
         )
 
     async def list_area_names(self) -> dict[int, str]:
-        return await self._walk_named_objects(
+        """Return area names, falling back to "Area N" when none are named.
+
+        Most installs assign no user-visible name to areas — single-area
+        homes don't bother, and even multi-area installs commonly leave
+        area names blank. HA needs *something* to label each area entity,
+        so we synthesize "Area 1".."Area 8" (the Omni Pro II cap) when
+        the Properties walk returns no names. Mirrors the v1 adapter's
+        list_area_names fallback in omni_pca.v1.adapter.
+        """
+        named = await self._walk_named_objects(
             ObjectType.AREA,
             lambda r: (r.index, r.name) if isinstance(r, AreaProperties) else None,
         )
+        if named:
+            return named
+        return {i: f"Area {i}" for i in range(1, 9)}
 
     async def subscribe(
         self, callback: Callable[[Message], Awaitable[None]]

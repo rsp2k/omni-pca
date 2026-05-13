@@ -166,13 +166,14 @@ async def test_mockpanel_from_pca_drives_full_ha_discovery(
             # zone surfaces as area=1 through the wire Properties reply.
             for idx, z in coordinator.data.zones.items():
                 assert z.area == 1, f"zone {idx} expected area=1 got {z.area}"
-            # Note: coordinator.data.areas is empty here because this
-            # fixture has no user-assigned area names and the v2 client's
-            # list_area_names() only returns named areas — that's a
-            # separate HA discovery concern. The mock *does* serve the
-            # delays in Properties replies; verify directly:
-            # (see test_e2e_program_echo.py for the MockState side, which
-            # has Area 1 with the correct entry_delay=60 / exit_delay=90).
+            # Areas: the live fixture has no user-assigned area names
+            # but the v2 client's list_area_names now falls back to
+            # "Area 1".."Area 8". HA's _discover_areas then enumerates
+            # each, walks the Properties reply, and lands the configured
+            # entry/exit delays from SetupData.
+            assert 1 in coordinator.data.areas
+            assert coordinator.data.areas[1].entry_delay == 60
+            assert coordinator.data.areas[1].exit_delay == 90
         finally:
             await hass.config_entries.async_unload(entry.entry_id)
             await hass.async_block_till_done()

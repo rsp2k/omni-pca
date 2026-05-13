@@ -147,6 +147,14 @@ class MockAreaState:
     entry_delay: int = 30  # seconds; configured grace period after a door opens
     exit_delay: int = 60   # seconds; configured grace period after arming
     enabled: bool = True   # whether this area is part of NumAreasUsed
+    # Boolean configuration flags — not on the wire (the Properties
+    # reply doesn't carry them); kept here for snapshots from .pca and
+    # any future SetupData-aware code paths.
+    entry_chime: bool = False
+    quick_arm: bool = False
+    auto_bypass: bool = False
+    all_on_for_alarm: bool = False
+    trouble_beep: bool = False
 
 
 @dataclass
@@ -346,6 +354,11 @@ class MockState:
                     entry_delay=acct.area_entry_delays.get(i, 30),
                     exit_delay=acct.area_exit_delays.get(i, 60),
                     enabled=i <= acct.num_areas_used,
+                    entry_chime=acct.area_entry_chime.get(i, False),
+                    quick_arm=acct.area_quick_arm.get(i, False),
+                    auto_bypass=acct.area_auto_bypass.get(i, False),
+                    all_on_for_alarm=acct.area_all_on_for_alarm.get(i, False),
+                    trouble_beep=acct.area_trouble_beep.get(i, False),
                 )
                 for i in sorted(in_use_areas)
             },

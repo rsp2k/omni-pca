@@ -361,6 +361,21 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert acct.num_areas_used == 1
     assert acct.area_entry_delays[1] == 60
     assert acct.area_exit_delays[1] == 90
+
+    # Area-1 boolean flags (real homeowner-configured values):
+    #   EntryChime    OFF   (no keypad chime on entry)
+    #   QuickArm      ON    (arming without a code)
+    #   AutoBypass    OFF
+    #   AllOnForAlarm ON
+    #   TroubleBeep   OFF
+    assert acct.area_entry_chime[1] is False
+    assert acct.area_quick_arm[1] is True
+    assert acct.area_auto_bypass[1] is False
+    assert acct.area_all_on_for_alarm[1] is True
+    assert acct.area_trouble_beep[1] is False
+    # And the values flowed through MockState.
+    assert state.areas[1].quick_arm is True
+    assert state.areas[1].entry_chime is False
     assert state.zones[1].name == "GARAGE ENTRY"
     assert state.units[1].name == "ROOM ONE"
     assert state.thermostats[1].name == "DOWNSTAIRS"
