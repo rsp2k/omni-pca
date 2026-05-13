@@ -1,10 +1,16 @@
 """End-to-end wire round-trip: client → MockPanel → program decoded.
 
-Seeds the MockPanel with a known :class:`Program`, drives the v2
-``UploadProgram`` opcode through a real TCP socket, and asserts the
-decoded round-trip equals the seeded Program. Proves the on-the-wire
-framing (2-byte BE ProgramNumber header + 14-byte body wrapped in a
-``ProgramData`` reply) lines up with our decoder.
+Seeds the MockPanel with known :class:`Program` records, exercises
+both wire dialects, and asserts the decoded result equals what was
+seeded.
+
+* v2 (TCP, request/response per slot): drives ``UploadProgram`` once
+  per slot. Proves the per-program framing (2-byte BE ProgramNumber +
+  14-byte body wrapped in a ``ProgramData`` reply).
+* v1 (UDP, streaming): drives bare ``UploadPrograms``, ack-walks the
+  streamed ``ProgramData`` replies to ``EOD``. Proves the streaming
+  lock-step matches the panel's behaviour described in
+  ``clsHAC.OL1ReadConfig`` (clsHAC.cs:4403, 4538-4540, 4642-4651).
 """
 
 from __future__ import annotations
@@ -15,8 +21,9 @@ import pytest
 
 from omni_pca.connection import OmniConnection
 from omni_pca.mock_panel import MockPanel, MockState
-from omni_pca.opcodes import OmniLink2MessageType
+from omni_pca.opcodes import OmniLink2MessageType, OmniLinkMessageType
 from omni_pca.programs import Days, Program, ProgramType
+from omni_pca.v1 import OmniClientV1
 
 CONTROLLER_KEY = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
 
@@ -134,3 +141,79 @@ async def test_v2_upload_program_event_type_no_swap_on_wire() -> None:
         decoded = Program.from_wire_bytes(body, slot=7)
         assert decoded.month == 5
         assert decoded.day == 12
+
+
+# ---- v1 streaming -------------------------------------------------------
+
+
+def _decode_v1_programdata(payload: bytes) -> tuple[int, Program]:
+    """Strip the BE ProgramNumber prefix from a v1 ``ProgramData`` payload,
+    decode the 14-byte body. Mirrors the v2 helper inline above."""
+    assert len(payload) >= 2 + 14
+    slot = (payload[0] << 8) | payload[1]
+    return slot, Program.from_wire_bytes(payload[2 : 2 + 14], slot=slot)
+
+
+@pytest.mark.asyncio
+async def test_v1_upload_programs_streams_all_seeded_slots() -> None:
+    """The v1 ``UploadPrograms`` opcode is bare; the panel streams one
+    ``ProgramData`` reply per defined slot, each followed by a client Ack,
+    terminated by ``EOD``. Order is by ascending slot index — which is
+    what we feed back from ``sorted(state.programs)``."""
+    seeded = {
+        12: Program(slot=12, prog_type=int(ProgramType.TIMED), cmd=3, hour=6, minute=0,
+                    days=int(Days.MONDAY | Days.FRIDAY)),
+        42: Program(slot=42, prog_type=int(ProgramType.TIMED), cond=0x8D09, cond2=0x9B09,
+                    cmd=0x44, par=3, pr2=0x0100, month=8, day=12,
+                    days=int(Days.MONDAY), hour=7, minute=15),
+        99: Program(slot=99, prog_type=int(ProgramType.EVENT), cmd=5, month=5, day=12),
+    }
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(programs={s: p.encode_wire_bytes() for s, p in seeded.items()}),
+    )
+    async with panel.serve(transport="udp") as (host, port):
+        async with OmniClientV1(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as c:
+            received: dict[int, Program] = {}
+            async for reply in c.connection.iter_streaming(
+                OmniLinkMessageType.UploadPrograms
+            ):
+                assert reply.opcode == int(OmniLinkMessageType.ProgramData)
+                slot, prog = _decode_v1_programdata(reply.payload)
+                received[slot] = prog
+
+    assert set(received) == set(seeded)
+    for slot, want in seeded.items():
+        got = received[slot]
+        # Field-by-field — same checks as the v2 test, plus a slot equality.
+        assert got.slot == slot
+        assert got.prog_type == want.prog_type
+        assert got.cond == want.cond
+        assert got.cond2 == want.cond2
+        assert got.cmd == want.cmd
+        assert got.par == want.par
+        assert got.pr2 == want.pr2
+        assert got.month == want.month
+        assert got.day == want.day
+        assert got.days == want.days
+        assert got.hour == want.hour
+        assert got.minute == want.minute
+
+
+@pytest.mark.asyncio
+async def test_v1_upload_programs_empty_state_yields_immediate_eod() -> None:
+    """No programs defined → the streaming iterator terminates without
+    yielding anything (the panel jumps straight to EOD)."""
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=MockState())
+    async with panel.serve(transport="udp") as (host, port):
+        async with OmniClientV1(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0
+        ) as c:
+            replies = [
+                r async for r in c.connection.iter_streaming(
+                    OmniLinkMessageType.UploadPrograms
+                )
+            ]
+    assert replies == []

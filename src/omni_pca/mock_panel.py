@@ -344,6 +344,9 @@ class MockPanel:
         # v1 UploadNames cursor: index into self._v1_name_stream() while a
         # streaming download is in flight, ``None`` when no stream active.
         self._upload_names_cursor: int | None = None
+        # v1 UploadPrograms cursor: index into self._v1_program_stream() while
+        # a streaming download is in flight, ``None`` when no stream active.
+        self._upload_programs_cursor: int | None = None
 
     # -------- public observables (handy in tests) --------
 
@@ -1236,10 +1239,14 @@ class MockPanel:
             return self._v1_reply_auxiliary_status(payload), ()
         if opcode == OmniLinkMessageType.UploadNames:
             return self._v1_start_upload_names_stream(), ()
+        if opcode == OmniLinkMessageType.UploadPrograms:
+            return self._v1_start_upload_programs_stream(), ()
         if opcode == OmniLinkMessageType.Ack:
-            # During an active UploadNames stream, each client Ack
-            # advances the cursor. With no active stream, drop silently
-            # (Ack as a request opcode is only meaningful mid-stream).
+            # During an active stream, each client Ack advances the
+            # appropriate cursor. With no active stream, Ack as a request
+            # opcode is only meaningful mid-stream — NAK it.
+            if self._upload_programs_cursor is not None:
+                return self._v1_advance_upload_programs_stream(), ()
             if self._upload_names_cursor is not None:
                 return self._v1_advance_upload_names_stream(), ()
             return _build_v1_nak(opcode), ()
@@ -1449,6 +1456,46 @@ class MockPanel:
             return _build_v1_eod()
         t, n, name = names[self._upload_names_cursor]
         return self._v1_namedata_msg(t, n, name)
+
+    # ---- UploadPrograms streaming ----
+    #
+    # Wire flow per clsHAC.OL1ReadConfig (clsHAC.cs:4403, 4538-4540, 4642-4651):
+    #   client → UploadPrograms (bare)
+    #   panel  → ProgramData (slot N body)
+    #   client → Ack
+    #   panel  → ProgramData (slot N+1 body)   ...
+    #   panel  → EOD
+    #
+    # ProgramData body layout matches v2 exactly (clsOLMsgProgramData
+    # mirrors clsOL2MsgProgramData byte-for-byte) — both prepend a 2-byte
+    # BE ProgramNumber to the 14-byte wire body. Only the outer envelope
+    # opcode differs (v1 vs v2).
+
+    def _v1_program_stream(self) -> list[int]:
+        """Sorted list of defined program slot numbers."""
+        return sorted(self.state.programs)
+
+    def _v1_programdata_msg(self, slot: int) -> Message:
+        body = self.state.programs.get(slot, b"\x00" * 14)
+        payload = bytes([(slot >> 8) & 0xFF, slot & 0xFF]) + body
+        return encode_v1(OmniLinkMessageType.ProgramData, payload)
+
+    def _v1_start_upload_programs_stream(self) -> Message:
+        slots = self._v1_program_stream()
+        if not slots:
+            self._upload_programs_cursor = None
+            return _build_v1_eod()
+        self._upload_programs_cursor = 0
+        return self._v1_programdata_msg(slots[0])
+
+    def _v1_advance_upload_programs_stream(self) -> Message:
+        slots = self._v1_program_stream()
+        assert self._upload_programs_cursor is not None
+        self._upload_programs_cursor += 1
+        if self._upload_programs_cursor >= len(slots):
+            self._upload_programs_cursor = None
+            return _build_v1_eod()
+        return self._v1_programdata_msg(slots[self._upload_programs_cursor])
 
     # ---- v1 Command / ExecuteSecurityCommand wrappers ----
     # The wire payload format is byte-identical to v2 (clsOLMsgCommand.cs
