@@ -388,16 +388,42 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert acct.dst_end_month == 11
     assert acct.dst_end_week == 1
 
-    # Unit type derivation by index range:
-    assert acct.unit_types[1] == 1       # X10 → Standard
+    # Unit type derivation — X10 sub-types resolved via HouseCodeFormat.
+    # HouseCode 1 in this fixture is HLC (5), so units 1..16 split into
+    # HLCRoom (Number-1 ≡ 0 mod 8) and HLCLoad. HouseCodes 2..16 are
+    # Extended (1), so units 17..256 are enuOL2UnitType.Extended (2).
+    assert acct.unit_types[1] == 5       # ROOM ONE → HLCRoom
+    assert acct.unit_types[2] == 6       # FRONT PORCH → HLCLoad
+    assert acct.unit_types[9] == 5       # next room-slot → HLCRoom
+    assert acct.unit_types[17] == 2      # HouseCode 2 Extended → Extended
     assert acct.unit_types[257] == 13    # ExpEnc → Output
     assert acct.unit_types[385] == 13    # VoltOut → Output
     assert acct.unit_types[393] == 12    # FlagOut → Flag
-    # Unit type/areas threaded into MockUnitState — every unit is X10
-    # type 1 (the named ones in this fixture are all X10).
-    assert state.units[1].unit_type == 1
+    # Unit type/areas threaded into MockUnitState — first 16 units are
+    # under HouseCode 1 (HLC).
+    assert state.units[1].unit_type == 5  # ROOM ONE → HLCRoom
     # Area was 0xff (panel default = "all") → normalized to 0x01 in mock.
     assert state.units[1].areas == 0x01
+
+    # HouseCodes.EnableExtCode raw bytes.
+    assert acct.house_code_formats[1] == 5    # HLC
+    assert all(v == 1 for v in (
+        acct.house_code_formats[i] for i in range(2, 17)
+    ))  # all Extended
+
+    # TimeClock 1: outdoor-lights schedule On 22:30 → Off 06:00 daily.
+    tc1_on, tc1_off = acct.time_clocks[0], acct.time_clocks[1]
+    assert (tc1_on.hour, tc1_on.minute) == (22, 30)
+    assert tc1_on.days == 0xFE  # every day (bits 1..7)
+    assert (tc1_off.hour, tc1_off.minute) == (6, 0)
+
+    # Installer / PCAccess codes (PII; both repr=False).
+    assert 0 < acct.installer_code <= 0xFFFF
+    assert 0 < acct.pc_access_code <= 0xFFFF
+    assert acct.enable_pc_access is True
+    r = repr(acct)
+    assert "installer_code" not in r
+    assert "pc_access_code" not in r
 
     # Codes: PINs decode as BE u16. PII fields not in repr().
     assert acct.code_authority[1] == 1   # COMPUTER → User

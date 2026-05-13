@@ -301,6 +301,30 @@ class PcaAccount:
     code_authority: dict[int, int] = field(default_factory=dict)
     code_areas: dict[int, int] = field(default_factory=dict)
 
+    # HouseCodes.EnableExtCode array (16 bytes on OMNI_PRO_II — one per
+    # 16-unit X10 group). Values are raw ``enuHouseCodeFormat`` bytes:
+    # 0=Standard, 1=Extended, 2=Compose, 3=UPB, 4=RadioRA, 5=HLC,
+    # 6=CentraLite, 7=ZWave, 8=LutronHomeWorks, 9=Clipsal_C_Bus,
+    # 10=Dynalite, 11=RadioRA2, 12=Somfy_SDN, 13=ZigBee, 14=KNX,
+    # 15=LumaNet, 16=Somfy_URTSI. ``unit_types`` for X10 units uses
+    # this table to resolve specific sub-types (HLCRoom vs HLCLoad,
+    # ViziaRoomController vs ViziaLoad, etc.) per clsUnit.CalculateUnitType.
+    house_code_formats: dict[int, int] = field(default_factory=dict)
+
+    # Three panel-wide time-clock schedules (TimeClock 1/2/3), each as
+    # an (On, Off) pair. Tuple of six TimeClocks in order:
+    # TC1.On, TC1.Off, TC2.On, TC2.Off, TC3.On, TC3.Off. Empty tuple
+    # when SetupData wasn't walked successfully.
+    time_clocks: tuple[TimeClock, ...] = ()
+
+    # Two panel-wide PINs for authenticated config access. PII —
+    # ``repr=False`` so they never leak into ``print(acct)``. Both are
+    # BE u16 ("4-digit decimal"). ``enable_pc_access`` is the toggle
+    # that lets a PC Access client connect at all.
+    installer_code: int = field(default=0, repr=False)
+    enable_pc_access: bool = False
+    pc_access_code: int = field(default=0, repr=False)
+
     # DST configuration (when the panel switches between DST and standard
     # time). Values are raw bytes from enuDSTMonth / enuDSTWeek:
     # 0 = Disabled, 1..12 = month, 1..7 = week (1=First Sunday, 2=Second,
@@ -410,6 +434,20 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     "dstStartWeekOffset": 1914,
     "dstEndMonthOffset": 1915,
     "dstEndWeekOffset": 1916,
+    # HouseCodes.EnableExtCode[1..16] (1 byte/HouseCode, raw
+    # enuHouseCodeFormat). Read order is right after the 4 DST bytes
+    # per clsHAC.cs:3084-3088. Live fixture: [5,1,1,...,1] = HouseCode 1
+    # is HLC, the rest are Extended.
+    "houseCodeFormatOffset": 1917,
+    # Six 5-byte clsWhen structs in order TC1.On, TC1.Off, TC2.On,
+    # TC2.Off, TC3.On, TC3.Off (clsHAC.cs:3058-3063, before
+    # Latitude/Longitude/TimeZone).
+    "timeClocksOffset": 1863,
+    # InstallerCode/PCAccessCode are BE u16 inside the installer
+    # section, sandwiching the EnablePCAccess bool at offset 2997.
+    "installerCodeOffset": 2995,
+    "enablePCAccessOffset": 2997,
+    "pcAccessCodeOffset": 2998,
 
     # Installer section begins at byte 2560 (clsCapOMNI_PRO_II.instSetupStart).
     # Layout for OMNI_PRO_II observed empirically against the live fixture
@@ -553,6 +591,31 @@ def _walk_to_remarks(r: PcaReader) -> dict[int, str]:
         return {}
 
 
+@dataclass(frozen=True, slots=True)
+class TimeClock:
+    """A panel time-clock schedule (``clsWhen``).
+
+    Five raw bytes from SetupData. ``hour``/``minute`` are 0..23/0..59.
+    ``month``/``day`` are 0 when the entry repeats by day-of-week
+    rather than a fixed date. ``days`` is the raw ``enuDays`` bitmask
+    where bit 1=Mon, bit 2=Tue, bit 3=Wed, bit 4=Thu, bit 5=Fri,
+    bit 6=Sat, bit 7=Sun (bit 0 unused). 0xFE = every day; 0x00 = the
+    entry is unscheduled / disabled.
+    """
+
+    hour: int
+    minute: int
+    month: int
+    day: int
+    days: int
+
+    @classmethod
+    def parse(cls, data: bytes) -> TimeClock:
+        if len(data) < 5:
+            return cls(0, 0, 0, 0, 0)
+        return cls(data[0], data[1], data[2], data[3], data[4])
+
+
 @dataclass
 class _ConnectionWalk:
     """Side-channel output of :func:`_walk_to_connection`.
@@ -589,6 +652,11 @@ class _ConnectionWalk:
     code_pins: dict[int, int] = field(default_factory=dict, repr=False)
     code_authority: dict[int, int] = field(default_factory=dict)
     code_areas: dict[int, int] = field(default_factory=dict)
+    house_code_formats: dict[int, int] = field(default_factory=dict)
+    time_clocks: tuple[TimeClock, ...] = ()
+    installer_code: int = 0
+    enable_pc_access: bool = False
+    pc_access_code: int = 0
     dst_start_month: int = 0
     dst_start_week: int = 0
     dst_end_month: int = 0
@@ -681,6 +749,44 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
     dst_end_month = _read_scalar_byte("dstEndMonthOffset")
     dst_end_week = _read_scalar_byte("dstEndWeekOffset")
 
+    # HouseCodes.EnableExtCode[1..N] — one byte per X10 house code group.
+    # Count derives from CAP as (lastX10 - firstX10 + 1) / 16 = 16 on
+    # OMNI_PRO_II (clsHouseCodes.cs:35).
+    hcf_off = cap.get("houseCodeFormatOffset")
+    f_x10_for_hc = cap.get("firstX10", 0)
+    l_x10_for_hc = cap.get("lastX10", 0)
+    n_hcf = (l_x10_for_hc - f_x10_for_hc + 1) // 16 if l_x10_for_hc else 0
+    house_code_formats: dict[int, int] = {}
+    if hcf_off is not None and hcf_off + n_hcf <= len(setup_data):
+        for k in range(1, n_hcf + 1):
+            house_code_formats[k] = setup_data[hcf_off + k - 1]
+
+    # Six 5-byte clsWhen structs for TimeClock 1/2/3 On/Off.
+    tc_off = cap.get("timeClocksOffset")
+    time_clocks: tuple[TimeClock, ...] = ()
+    if tc_off is not None and tc_off + 30 <= len(setup_data):
+        time_clocks = tuple(
+            TimeClock.parse(setup_data[tc_off + i * 5 : tc_off + (i + 1) * 5])
+            for i in range(6)
+        )
+
+    # InstallerCode / PCAccessCode (BE u16) flanking the EnablePCAccess
+    # toggle. All three live in the installer section.
+    def _read_be_u16(offset_key: str) -> int:
+        off = cap.get(offset_key)
+        if off is None or off + 2 > len(setup_data):
+            return 0
+        return (setup_data[off] << 8) | setup_data[off + 1]
+
+    installer_code = _read_be_u16("installerCodeOffset")
+    pc_access_code = _read_be_u16("pcAccessCodeOffset")
+    epa_off = cap.get("enablePCAccessOffset")
+    enable_pc_access = (
+        bool(setup_data[epa_off])
+        if epa_off is not None and epa_off < len(setup_data)
+        else False
+    )
+
     # Unit type + area assignment, per unit index.
     #
     # Unit *type* is derived from which CAP range the index falls in
@@ -727,6 +833,28 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
             code_authority[k] = setup_data[base + 2]
             code_areas[k] = setup_data[base + 3]
 
+    # Direct enuHouseCodeFormat → enuOL2UnitType mapping for the
+    # non-conditional formats (clsUnit.CalculateUnitType,
+    # clsUnit.cs:928-999). HLC and ZWave have a Number-position-based
+    # split (Room vs Load); see the inline branches below.
+    _HCFMT_TO_UTYPE: dict[int, int] = {
+        0: 1,    # Standard       → Standard
+        1: 2,    # Extended       → Extended
+        2: 3,    # Compose        → Compose
+        3: 4,    # UPB            → UPB
+        4: 8,    # RadioRA        → RadioRA
+        6: 9,    # CentraLite     → Centralite
+        8: 16,   # LutronHomeWorks
+        9: 17,   # Clipsal_C_Bus
+        10: 18,  # Dynalite
+        11: 19,  # RadioRA2
+        12: 20,  # Somfy_SDN
+        13: 21,  # ZigBee
+        14: 22,  # KNX
+        15: 23,  # LumaNet
+        16: 24,  # Somfy_URTSI
+    }
+
     unit_types: dict[int, int] = {}
     unit_areas: dict[int, int] = {}
     f_x10, l_x10 = cap.get("firstX10", 0), cap.get("lastX10", 0)
@@ -736,7 +864,22 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
     max_units = cap.get("max_units", 0)
     for u in range(1, max_units + 1):
         if f_x10 and f_x10 <= u <= l_x10:
-            unit_types[u] = 1  # enuOL2UnitType.Standard (collapsed X10 default)
+            # Resolve specific X10 sub-type via the HouseCode containing
+            # this unit. House code N covers units (N-1)*16+1..N*16, so
+            # ((u - firstX10) // 16) + 1 is the 1-based HouseCode index.
+            hc_idx = (u - f_x10) // 16 + 1
+            hcfmt = house_code_formats.get(hc_idx, 0)
+            if hcfmt == 5:  # HLC
+                # HLCRoom (5) if Number-1 is a multiple of 8, else HLCLoad (6).
+                unit_types[u] = 5 if (u - 1) % 8 == 0 else 6
+            elif hcfmt == 7:  # ZWave
+                # ViziaRoomController (10) for "room" position, else ViziaLoad (11).
+                # Real-panel ViziaRoomController also requires ZWaveNodeID
+                # context the .pca doesn't carry; we approximate with the
+                # Number-position rule alone.
+                unit_types[u] = 10 if (u - 1) % 8 == 0 else 11
+            else:
+                unit_types[u] = _HCFMT_TO_UTYPE.get(hcfmt, 1)
             unit_areas[u] = _read_area_group(
                 "x10AreaGroupsOffset", (u - f_x10) // 16
             )
@@ -816,6 +959,11 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         code_pins=code_pins,
         code_authority=code_authority,
         code_areas=code_areas,
+        house_code_formats=house_code_formats,
+        time_clocks=time_clocks,
+        installer_code=installer_code,
+        enable_pc_access=enable_pc_access,
+        pc_access_code=pc_access_code,
         dst_start_month=dst_start_month,
         dst_start_week=dst_start_week,
         dst_end_month=dst_end_month,
@@ -925,6 +1073,11 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.code_pins = walk.code_pins
     account.code_authority = walk.code_authority
     account.code_areas = walk.code_areas
+    account.house_code_formats = walk.house_code_formats
+    account.time_clocks = walk.time_clocks
+    account.installer_code = walk.installer_code
+    account.enable_pc_access = walk.enable_pc_access
+    account.pc_access_code = walk.pc_access_code
     account.dst_start_month = walk.dst_start_month
     account.dst_start_week = walk.dst_start_week
     account.dst_end_month = walk.dst_end_month
