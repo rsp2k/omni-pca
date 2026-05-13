@@ -20,6 +20,8 @@ from omni_pca.connection import (
 
 from .const import (
     CONF_CONTROLLER_KEY,
+    CONF_PCA_KEY,
+    CONF_PCA_PATH,
     CONF_TRANSPORT,
     CONTROLLER_KEY_HEX_LEN,
     DEFAULT_PORT,
@@ -70,6 +72,15 @@ _USER_SCHEMA = vol.Schema(
         vol.Required(CONF_TRANSPORT, default=DEFAULT_TRANSPORT): vol.In(
             [TRANSPORT_TCP, TRANSPORT_UDP]
         ),
+        # Optional: load panel programs from a saved .pca file on the HA
+        # filesystem (e.g. /config/pca/My_House.pca) instead of streaming
+        # them from the panel on every restart. Useful when wire
+        # enumeration is slow or unreliable. CONF_PCA_KEY is the
+        # per-install key from PCA01.CFG (a uint32, 0 for plain-text).
+        vol.Optional(CONF_PCA_PATH, default=""): str,
+        vol.Optional(CONF_PCA_KEY, default=0): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=0xFFFFFFFF)
+        ),
     }
 )
 
@@ -90,6 +101,8 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
             host: str = user_input[CONF_HOST].strip()
             port: int = user_input[CONF_PORT]
             transport: str = user_input.get(CONF_TRANSPORT, DEFAULT_TRANSPORT)
+            pca_path: str = (user_input.get(CONF_PCA_PATH) or "").strip()
+            pca_key: int = user_input.get(CONF_PCA_KEY, 0)
             unique_id = f"{host}:{port}"
 
             await self.async_set_unique_id(unique_id)
@@ -101,25 +114,57 @@ class OmniConfigFlow(ConfigFlow, domain=DOMAIN):
                 LOGGER.debug("controller key rejected: %s", err)
                 errors[CONF_CONTROLLER_KEY] = "invalid_key"
             else:
-                title, error = await self._probe(host, port, key, transport)
-                if error is not None:
-                    errors["base"] = error
-                else:
-                    return self.async_create_entry(
-                        title=title or f"Omni Panel ({host})",
-                        data={
-                            CONF_HOST: host,
-                            CONF_PORT: port,
-                            CONF_CONTROLLER_KEY: key.hex(),
-                            CONF_TRANSPORT: transport,
-                        },
-                    )
+                if pca_path and (pca_err := await self._validate_pca(pca_path, pca_key)):
+                    errors[CONF_PCA_PATH] = pca_err
+                if not errors:
+                    title, error = await self._probe(host, port, key, transport)
+                    if error is not None:
+                        errors["base"] = error
+                    else:
+                        return self.async_create_entry(
+                            title=title or f"Omni Panel ({host})",
+                            data={
+                                CONF_HOST: host,
+                                CONF_PORT: port,
+                                CONF_CONTROLLER_KEY: key.hex(),
+                                CONF_TRANSPORT: transport,
+                                CONF_PCA_PATH: pca_path,
+                                CONF_PCA_KEY: pca_key,
+                            },
+                        )
 
         return self.async_show_form(
             step_id="user",
             data_schema=_USER_SCHEMA,
             errors=errors,
         )
+
+    async def _validate_pca(self, path: str, key: int) -> str | None:
+        """Validate the user-supplied .pca path is readable and decrypts.
+
+        Returns ``None`` on success or an error code string on failure
+        (matches the {code: message} keys in strings.json).
+        """
+        from pathlib import Path
+
+        from omni_pca.pca_file import parse_pca_file
+
+        p = Path(path)
+        if not p.is_file():
+            return "pca_not_found"
+        try:
+            data = await self.hass.async_add_executor_job(p.read_bytes)
+            acct = await self.hass.async_add_executor_job(
+                lambda: parse_pca_file(data, key=key)
+            )
+        except Exception as err:
+            LOGGER.debug("pca file rejected: %s", err)
+            return "pca_decode_failed"
+        # Sanity: programs block decoded cleanly. Empty is allowed
+        # (legitimate brand-new install with no programs).
+        if not isinstance(acct.programs, tuple):
+            return "pca_decode_failed"
+        return None
 
     async def async_step_reauth(
         self, entry_data: Mapping[str, Any]

@@ -16,6 +16,8 @@ from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import (
     CONF_CONTROLLER_KEY,
+    CONF_PCA_KEY,
+    CONF_PCA_PATH,
     CONF_TRANSPORT,
     DEFAULT_TRANSPORT,
     DOMAIN,
@@ -57,6 +59,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     transport: str = entry.data.get(CONF_TRANSPORT, DEFAULT_TRANSPORT)
+    pca_path: str = entry.data.get(CONF_PCA_PATH, "") or ""
+    pca_key: int = entry.data.get(CONF_PCA_KEY, 0)
     coordinator = OmniDataUpdateCoordinator(
         hass,
         entry,
@@ -64,6 +68,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         port=port,
         controller_key=controller_key,
         transport=transport,
+        pca_path=pca_path or None,
+        pca_key=pca_key,
     )
 
     try:

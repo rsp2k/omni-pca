@@ -14,6 +14,13 @@ DEFAULT_TIMEOUT: Final = 5.0
 CONF_CONTROLLER_KEY: Final = "controller_key"
 CONF_TRANSPORT: Final = "transport"
 
+# Optional: when set, load panel programs from a .pca file at this path
+# instead of enumerating them over the wire on every entry refresh. The
+# .pca file is decrypted with CONF_PCA_KEY (the per-install key from
+# PCA01.CFG, or 0 for a plain-text dump). Both must be set together.
+CONF_PCA_PATH: Final = "pca_path"
+CONF_PCA_KEY: Final = "pca_key"
+
 TRANSPORT_TCP: Final = "tcp"
 TRANSPORT_UDP: Final = "udp"
 DEFAULT_TRANSPORT: Final = TRANSPORT_TCP

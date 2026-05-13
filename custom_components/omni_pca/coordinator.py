@@ -138,6 +138,8 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
         port: int,
         controller_key: bytes,
         transport: str = "tcp",
+        pca_path: str | None = None,
+        pca_key: int = 0,
     ) -> None:
         super().__init__(
             hass,
@@ -150,6 +152,8 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
         self._port = port
         self._controller_key = controller_key
         self._transport = transport
+        self._pca_path = pca_path
+        self._pca_key = pca_key
         self._client: OmniClient | None = None
         self._discovery_done = False
         self._discovered: OmniData | None = None
@@ -383,19 +387,25 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
     async def _discover_programs(
         self, client: OmniClient
     ) -> dict[int, Program]:
-        """Enumerate defined panel programs via the appropriate wire path.
+        """Enumerate defined panel programs.
 
-        * v2 (TCP): ``client.iter_programs()`` drives UploadProgram with
-          request_reason=1 ("next defined after slot"), stopping at EOD.
-        * v1 (UDP): the adapter forwards to OmniClientV1.iter_programs(),
-          which is a bare UploadPrograms stream ack-walked to EOD.
+        Two sources, in order of preference:
 
-        Both surfaces yield :class:`omni_pca.programs.Program` and skip
-        empty slots, so the resulting dict only carries defined programs.
-        Errors during enumeration are logged and swallowed — programs
-        are a non-critical part of discovery, so a partial list is better
-        than blocking the entry setup.
+        1. ``CONF_PCA_PATH`` is configured → parse the .pca file and
+           extract the programs block. Avoids streaming 1500 records on
+           every entry refresh and works against an offline snapshot.
+        2. Otherwise → enumerate over the wire:
+           * v2 (TCP): ``client.iter_programs()`` drives UploadProgram
+             with request_reason=1 ("next defined after slot").
+           * v1 (UDP): adapter forwards to OmniClientV1.iter_programs(),
+             a bare UploadPrograms stream ack-walked to EOD.
+
+        Both paths yield :class:`omni_pca.programs.Program` and skip
+        empty slots. Errors are logged and swallowed — programs are
+        non-critical discovery, so a partial list beats blocking setup.
         """
+        if self._pca_path:
+            return await self._discover_programs_from_pca()
         out: dict[int, Program] = {}
         try:
             async for prog in client.iter_programs():
@@ -407,6 +417,38 @@ class OmniDataUpdateCoordinator(DataUpdateCoordinator[OmniData]):
             LOGGER.debug(
                 "program enumeration interrupted (kept %d)", len(out), exc_info=True
             )
+        return out
+
+    async def _discover_programs_from_pca(self) -> dict[int, Program]:
+        """Parse the configured .pca file and pull out its programs block.
+
+        Runs the disk I/O on the executor since :mod:`pca_file` does
+        sync reads. Any failure (missing file, bad key, malformed block)
+        is logged and downgraded to an empty dict — the rest of
+        discovery still works.
+        """
+        from pathlib import Path
+
+        from omni_pca.pca_file import parse_pca_file
+
+        try:
+            data = await self.hass.async_add_executor_job(
+                Path(self._pca_path).read_bytes
+            )
+            acct = await self.hass.async_add_executor_job(
+                lambda: parse_pca_file(data, key=self._pca_key)
+            )
+        except Exception:
+            LOGGER.warning(
+                "failed to load programs from %s — falling back to empty list",
+                self._pca_path, exc_info=True,
+            )
+            return {}
+        out: dict[int, Program] = {}
+        for prog in acct.programs:
+            if prog.slot is None or prog.is_empty():
+                continue
+            out[prog.slot] = prog
         return out
 
     async def _walk_properties(
