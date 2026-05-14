@@ -82,4 +82,4 @@ First release. Working library + Home Assistant custom component, validated end-
 - **PyPI publish**: `omni-pca` not yet on PyPI; HA `manifest.json` requirements line will only resolve once it is. For now users either install the wheel manually or pip-install from a Git URL.
 - **HACS submission**: pending live-panel validation.
 
-[2026.5.10]: https://git.supported.systems/warehack.ing/omni-pca/releases/tag/v2026.5.10
+[2026.5.10]: https://github.com/rsp2k/omni-pca/releases/tag/v2026.5.10

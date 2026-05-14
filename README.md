@@ -4,7 +4,7 @@ Async Python client for HAI/Leviton Omni-Link II home automation panels — Omni
 
 Includes a Home Assistant custom component (`custom_components/omni_pca/`).
 
-**Project home:** <https://git.supported.systems/warehack.ing/omni-pca>
+**Project home:** <https://github.com/rsp2k/omni-pca>
 **Documentation:** <https://hai-omni-pro-ii.warehack.ing/>
 
 ## Status
@@ -18,20 +18,14 @@ The full byte-level protocol spec lives at <https://hai-omni-pro-ii.warehack.ing
 
 ## Install
 
-The library isn't on PyPI yet (pending), so install directly from the Gitea release:
-
 ```bash
-# Pinned to a specific release (recommended)
-pip install "omni-pca @ git+https://git.supported.systems/warehack.ing/omni-pca.git@v2026.5.10"
-
-# Or the wheel from the release page
-pip install https://git.supported.systems/warehack.ing/omni-pca/releases/download/v2026.5.10/omni_pca-2026.5.10-py3-none-any.whl
+pip install omni-pca
 
 # Or with uv
-uv add "omni-pca @ git+https://git.supported.systems/warehack.ing/omni-pca.git@v2026.5.10"
+uv add omni-pca
 ```
 
-Once published to PyPI, the canonical install will be `pip install omni-pca`.
+For Home Assistant users, install the integration through HACS — see the [HA install how-to](https://hai-omni-pro-ii.warehack.ing/how-to/install-in-home-assistant/).
 
 ## Quick start (library)
 
@@ -79,7 +73,7 @@ The HA integration picks the right client automatically based on the **Transport
 cd /path/to/your/homeassistant/config/
 mkdir -p custom_components
 cd custom_components
-git clone https://git.supported.systems/warehack.ing/omni-pca tmp-omni
+git clone https://github.com/rsp2k/omni-pca tmp-omni
 cp -r tmp-omni/custom_components/omni_pca .
 rm -rf tmp-omni
 ```

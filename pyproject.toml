@@ -34,7 +34,10 @@ engine = ["astral>=2.2,<3"]
 omni-pca = "omni_pca.__main__:main"
 
 [project.urls]
-Repository = "https://git.supported.systems/warehack.ing/omni-pca"
+Repository = "https://github.com/rsp2k/omni-pca"
+Issues = "https://github.com/rsp2k/omni-pca/issues"
+Changelog = "https://github.com/rsp2k/omni-pca/blob/main/CHANGELOG.md"
+Documentation = "https://hai-omni-pro-ii.warehack.ing/"
 
 [build-system]
 requires = ["uv_build>=0.11.8,<0.12.0"]
