@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_CONTROLLER_KEY,
@@ -40,6 +41,8 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.SWITCH,
 ]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:

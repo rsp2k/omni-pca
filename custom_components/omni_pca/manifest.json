@@ -1,13 +1,13 @@
 {
     "domain": "omni_pca",
     "name": "HAI/Leviton Omni Panel",
-    "version": "2026.5.11",
-    "iot_class": "local_push",
+    "codeowners": ["@rsp2k"],
     "config_flow": true,
     "dependencies": [],
-    "codeowners": ["@rsp2k"],
-    "requirements": ["omni-pca==2026.5.11"],
     "documentation": "https://github.com/rsp2k/omni-pca",
+    "integration_type": "hub",
+    "iot_class": "local_push",
     "issue_tracker": "https://github.com/rsp2k/omni-pca/issues",
-    "integration_type": "hub"
+    "requirements": ["omni-pca==2026.5.11"],
+    "version": "2026.5.11"
 }

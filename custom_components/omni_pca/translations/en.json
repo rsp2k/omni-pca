@@ -3,7 +3,7 @@
         "step": {
             "user": {
                 "title": "Connect to your Omni panel",
-                "description": "Enter the IP/hostname of your HAI/Leviton Omni Pro II controller and the 32-character hex Controller Key. Use `omni-pca decode-pca <file>.pca --field controller_key` to extract the key from a PC Access export. Optionally provide a path to a saved `.pca` file to load panel programs from disk instead of streaming them from the controller.",
+                "description": "Enter the IP/hostname of your HAI/Leviton Omni Pro II controller and the 32-character hex Controller Key. Run omni-pca decode-pca with the --field controller_key option on a PC Access export file to extract the key. Optionally provide a path to a saved .pca file to load panel programs from disk instead of streaming them from the controller.",
                 "data": {
                     "host": "Host",
                     "port": "Port",
