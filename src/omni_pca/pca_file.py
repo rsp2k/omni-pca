@@ -214,6 +214,27 @@ class PcaAccount:
     basis — failure here doesn't break Connection extraction.
     """
 
+    # Free-text "account remarks" block (a PCA03 extension; appears
+    # between the ModemBaud flags and the nine Description blocks).
+    # Used by PC Access for installer notes about the site.
+    account_remarks_extended: str = field(default="", repr=False)
+
+    # Per-object Description tables — free-text "description" strings
+    # entered alongside each object's name in PC Access (e.g. zone 1's
+    # name is "FRONT DOOR" and its description might be "Solid wood,
+    # contacts at top hinge"). Keys are 1-based slot numbers, values
+    # are decoded UTF-8 strings (max 32 chars). Empty slots are
+    # omitted. Populated only for FileVersion >= 3.
+    zone_descriptions: dict[int, str] = field(default_factory=dict)
+    unit_descriptions: dict[int, str] = field(default_factory=dict)
+    button_descriptions: dict[int, str] = field(default_factory=dict)
+    code_descriptions: dict[int, str] = field(default_factory=dict)
+    thermostat_descriptions: dict[int, str] = field(default_factory=dict)
+    area_descriptions: dict[int, str] = field(default_factory=dict)
+    message_descriptions: dict[int, str] = field(default_factory=dict)
+    audio_source_descriptions: dict[int, str] = field(default_factory=dict)
+    audio_zone_descriptions: dict[int, str] = field(default_factory=dict)
+
     # Per-object name tables — populated from the Names block between
     # SetupData and Voices. Keys are 1-based slot numbers; empty slots
     # are omitted entirely (the panel stores them as length-0 String8
@@ -561,52 +582,92 @@ def _parse_header(r: PcaReader) -> tuple[str, int, int, int, int, int, str, str,
 _DESCRIPTION_SLOT_BYTES: Final[int] = 1 + 32
 
 
-def _walk_to_remarks(r: PcaReader) -> dict[int, str]:
-    """Pick up just-past Connection and walk through the description
-    blocks, then read and return the Remarks dict.
+@dataclass
+class _RemarksWalk:
+    """Side-channel output of :func:`_walk_to_remarks`.
 
-    Layout for PCA03 (FileVersion 3, per clsHAC.cs:8055-8079):
+    Captures everything in the post-Connection PCA03 extension:
+    AccountRemarks_Extended (free text), the nine per-family
+    Description tables, and the Remarks ID→text dict that
+    Remark-typed programs reference.
+    """
+
+    account_remarks_extended: str = ""
+    zone_descriptions: dict[int, str] = field(default_factory=dict)
+    unit_descriptions: dict[int, str] = field(default_factory=dict)
+    button_descriptions: dict[int, str] = field(default_factory=dict)
+    code_descriptions: dict[int, str] = field(default_factory=dict)
+    thermostat_descriptions: dict[int, str] = field(default_factory=dict)
+    area_descriptions: dict[int, str] = field(default_factory=dict)
+    message_descriptions: dict[int, str] = field(default_factory=dict)
+    audio_source_descriptions: dict[int, str] = field(default_factory=dict)
+    audio_zone_descriptions: dict[int, str] = field(default_factory=dict)
+    remarks: dict[int, str] = field(default_factory=dict)
+
+
+def _read_description_table(r: PcaReader) -> dict[int, str]:
+    """Read a per-family Description block: u32 count, then count ×
+    String8(32). Returns {1-based slot: description} omitting empties.
+
+    Mirrors ``clsZones.ReadDescription`` and friends — the format is
+    identical across object families.
+    """
+    count = r.u32()
+    out: dict[int, str] = {}
+    for i in range(1, count + 1):
+        text = r.string8_fixed(32)
+        if text:
+            out[i] = text
+    return out
+
+
+def _walk_to_remarks(r: PcaReader) -> _RemarksWalk:
+    """Walk the PCA03 post-Connection extension.
+
+    Layout for PCA03 (FileVersion 3, per clsHAC.cs:8058-8079):
 
     1. ``ModemBaud`` (u16 LE), 3× bool (1 byte each), AccountRemarks_Extended
        (String16: u16 length + bytes).
-    2. Nine Description blocks, one per object family — Zones, Units,
-       Buttons, Codes, Thermostats, Areas, Messages, AudioSources,
-       AudioZones. Each is ``[u32 count] + count * 33 bytes`` (per
-       :data:`_DESCRIPTION_SLOT_BYTES`); the contents are per-object
-       free-text descriptions we don't currently surface.
+    2. Nine Description blocks in the order Zones, Units, Buttons, Codes,
+       Thermostats, Areas, Messages, AudioSources, AudioZones. Each is
+       ``[u32 count] + count * 33 bytes`` (per :data:`_DESCRIPTION_SLOT_BYTES`).
+       The 33-byte slots are String8(32) — 1 length byte + 32 padded bytes.
     3. Remarks table:
            - ``_RemarksNextID`` (u32 LE) — what ``RemarksNextID()`` will
              hand out next.
            - ``count`` (u32 LE).
            - ``count`` entries of ``[u32 LE remark_id][String16 text]``.
 
-    Returns ``{}`` on any read failure (panels without remarks, or a
-    file format we don't recognise, just produce an empty dict —
-    callers shouldn't need to special-case that).
+    Returns an empty :class:`_RemarksWalk` on any read failure (panels
+    without these blocks, or a file format we don't recognise).
 
     Reference: clsPrograms.ReadRemarks (clsPrograms.cs:148-168),
-    clsAbstractNamedItem.ReadDescription, clsHAC.cs:8055-8079.
+    clsAbstractNamedItem.ReadDescription, clsHAC.cs:8058-8079.
     """
+    walk = _RemarksWalk()
     try:
         r.u16()                  # ModemBaud
         r.u8(); r.u8(); r.u8()   # PCModemInit1/2/3 enable flags
-        r.string16()             # AccountRemarks_Extended (variable)
-        # Nine description blocks.
-        for _ in range(9):
-            count = r.u32()
-            if count > 0:
-                r.bytes_(count * _DESCRIPTION_SLOT_BYTES)
+        walk.account_remarks_extended = r.string16()
+        walk.zone_descriptions = _read_description_table(r)
+        walk.unit_descriptions = _read_description_table(r)
+        walk.button_descriptions = _read_description_table(r)
+        walk.code_descriptions = _read_description_table(r)
+        walk.thermostat_descriptions = _read_description_table(r)
+        walk.area_descriptions = _read_description_table(r)
+        walk.message_descriptions = _read_description_table(r)
+        walk.audio_source_descriptions = _read_description_table(r)
+        walk.audio_zone_descriptions = _read_description_table(r)
         # Remarks table.
         r.u32()                  # _RemarksNextID
         remark_count = r.u32()
-        out: dict[int, str] = {}
         for _ in range(remark_count):
             rid = r.u32()
             text = r.string16()
-            out[rid] = text
-        return out
+            walk.remarks[rid] = text
+        return walk
     except (EOFError, ValueError, struct.error):
-        return {}
+        return walk
 
 
 @dataclass(frozen=True, slots=True)
@@ -1115,11 +1176,23 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.temp_format = walk.temp_format
     account.num_areas_used = walk.num_areas_used
 
-    # PCA03+ continues past Connection with ModemBaud flags + nine
-    # Description blocks + the Remarks table. We walk it on a
-    # best-effort basis — a failure here leaves account.remarks={}
-    # without affecting the Connection fields above.
+    # PCA03+ continues past Connection with ModemBaud flags +
+    # AccountRemarks_Extended + nine Description blocks + the Remarks
+    # table. We walk it on a best-effort basis — a failure here leaves
+    # the post-Connection fields empty without affecting the Connection
+    # fields above.
     if file_version >= 3:
-        account.remarks = _walk_to_remarks(r)
+        rwalk = _walk_to_remarks(r)
+        account.account_remarks_extended = rwalk.account_remarks_extended
+        account.zone_descriptions = rwalk.zone_descriptions
+        account.unit_descriptions = rwalk.unit_descriptions
+        account.button_descriptions = rwalk.button_descriptions
+        account.code_descriptions = rwalk.code_descriptions
+        account.thermostat_descriptions = rwalk.thermostat_descriptions
+        account.area_descriptions = rwalk.area_descriptions
+        account.message_descriptions = rwalk.message_descriptions
+        account.audio_source_descriptions = rwalk.audio_source_descriptions
+        account.audio_zone_descriptions = rwalk.audio_zone_descriptions
+        account.remarks = rwalk.remarks
 
     return account

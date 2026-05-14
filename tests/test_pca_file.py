@@ -223,7 +223,10 @@ def test_remarks_walker_on_empty_table() -> None:
         + struct.pack("<I", 0)      # count = 0
     )
     r = PcaReader(blob)
-    assert _walk_to_remarks(r) == {}
+    walk = _walk_to_remarks(r)
+    assert walk.remarks == {}
+    assert walk.account_remarks_extended == ""
+    assert walk.zone_descriptions == {}
 
 
 def test_remarks_walker_decodes_real_entries() -> None:
@@ -265,20 +268,25 @@ def test_remarks_walker_decodes_real_entries() -> None:
         + remarks_block
     )
     r = PcaReader(tail)
-    remarks = _walk_to_remarks(r)
-    assert remarks == {
+    walk = _walk_to_remarks(r)
+    assert walk.remarks == {
         1: "TURN ON LIVING ROOM LIGHTS",
         7: "DOG WALK TIME",
         0xDEADBEEF: "UTF-8 ✓ ☃ ♥",
     }
+    # The two synthetic zone-description entries decoded too.
+    assert walk.zone_descriptions == {1: "FOYER!", 2: "GARAGE LT"}
 
 
 def test_remarks_walker_returns_empty_on_truncated_input() -> None:
-    """A short/garbage tail should yield ``{}``, not raise."""
+    """A short/garbage tail should yield an empty walk record, not raise."""
     from omni_pca.pca_file import PcaReader, _walk_to_remarks
 
     # Way too short to hold even the prelude.
-    assert _walk_to_remarks(PcaReader(b"\x00" * 5)) == {}
+    walk = _walk_to_remarks(PcaReader(b"\x00" * 5))
+    assert walk.remarks == {}
+    assert walk.account_remarks_extended == ""
+    assert walk.zone_descriptions == {}
 
 
 def test_remarks_resolved_against_live_fixture_is_empty_dict() -> None:
@@ -304,7 +312,11 @@ def test_remarks_resolved_against_live_fixture_is_empty_dict() -> None:
     r.string8_fixed(120)
     r.string8_fixed(5)
     r.string8_fixed(32)
-    assert _walk_to_remarks(r) == {}
+    walk = _walk_to_remarks(r)
+    assert walk.remarks == {}
+    # Live fixture description tables — homeowner left them blank.
+    assert walk.zone_descriptions == {}
+    assert walk.unit_descriptions == {}
 
 
 def test_pca_account_dataclass_has_programs_field() -> None:
