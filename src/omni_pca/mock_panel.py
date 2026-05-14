@@ -173,6 +173,7 @@ class MockZoneState:
     loop: int = 0           # analog loop reading
     zone_type: int = 0      # raw enuZoneType byte (0=EntryExit default)
     area: int = 1           # 1-based area assignment
+    options: int = 0        # raw ZoneOptions bitmask (SetupData; panel default 4)
 
     @property
     def status_byte(self) -> int:
@@ -217,6 +218,8 @@ class MockThermostatState:
     outdoor_temperature_raw: int = 0
     horc_status: int = 0
     status: int = 1                # 1 = communicating with the panel
+    thermostat_type: int = 1       # raw enuThermostatType (1=AutoHeatCool)
+    areas: int = 0x01              # 8-bit area-membership bitmask
 
 
 @dataclass
@@ -348,6 +351,7 @@ class MockState:
                     name=n,
                     zone_type=acct.zone_types.get(i, 0),
                     area=acct.zone_areas.get(i, 1),
+                    options=acct.zone_options.get(i, 0),
                 )
                 for i, n in acct.zone_names.items()
             },
@@ -382,7 +386,17 @@ class MockState:
                 for i in sorted(in_use_areas)
             },
             "thermostats": {
-                i: MockThermostatState(name=n)
+                i: MockThermostatState(
+                    name=n,
+                    thermostat_type=acct.thermostat_types.get(i, 1),
+                    # 0xFF (uninitialised → "all areas") normalises to
+                    # area 1 only, consistent with the unit-area handling.
+                    areas=(
+                        0x01
+                        if acct.thermostat_areas.get(i, 0xFF) == 0xFF
+                        else acct.thermostat_areas[i]
+                    ),
+                )
                 for i, n in acct.thermostat_names.items()
             },
             "buttons": {
@@ -987,7 +1001,7 @@ class MockPanel:
                     zone.loop if zone else 0,
                     zone.zone_type if zone else 0,
                     zone.area if zone else 1,
-                    0,  # Options (not yet sourced from SetupData)
+                    zone.options if zone else 0,
                 ]
             )
             + self.state.zone_name_bytes(index)
@@ -1045,7 +1059,7 @@ class MockPanel:
                     t.system_mode if t else 0,
                     t.fan_mode if t else 0,
                     t.hold_mode if t else 0,
-                    1,                                       # thermostat type: AUTO_HEAT_COOL
+                    t.thermostat_type if t else 1,
                 ]
             )
             + self.state.thermostat_name_bytes(index)

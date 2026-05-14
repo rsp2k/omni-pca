@@ -263,6 +263,23 @@ class PcaAccount:
     # zone to area 1. Empty dict when SetupData wasn't walked successfully.
     zone_areas: dict[int, int] = field(default_factory=dict)
 
+    # Per-zone options bitmask from SetupData (clsHAC.cs:3405-3415).
+    # Raw byte, range-checked by the firmware to 0..7 (0..15 on EURO
+    # EN50131 panels) with a default of 4. The bits select per-zone
+    # behaviours (cross-zoning, swinger-shutdown participation, etc.);
+    # the precise bit semantics aren't decoded here. Keys are 1-based
+    # zone slots (1..numZones).
+    zone_options: dict[int, int] = field(default_factory=dict)
+
+    # Per-thermostat type + area assignment from SetupData
+    # (clsHAC.cs:3298-3320). ``thermostat_types`` values are raw
+    # ``enuThermostatType`` bytes (0=NotUsed/None, 1=AutoHeatCool, …);
+    # ``thermostat_areas`` values are 8-bit area-membership bitmasks
+    # (0xFF = all areas, the panel default). Keys are 1-based
+    # thermostat slots (1..numTstats).
+    thermostat_types: dict[int, int] = field(default_factory=dict)
+    thermostat_areas: dict[int, int] = field(default_factory=dict)
+
     # Per-area entry/exit delay (seconds) from SetupData user section.
     # Keys are 1-based area numbers (1..numAreas); typical values are
     # 30/60 (entry) and 60/90 (exit). Unused areas carry the panel
@@ -617,6 +634,26 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     "flagOutAreaGroupsOffset": 3059,  # (lastFlagOut-firstFlagOut+8)/8 = 15 bytes, 1 group/8 flags
     "expEncAreaGroupsOffset": 3074,   # (lastExpEncOut-firstExpEncOut+4)/4 = 32 bytes, 1 group/4 outputs
     "zoneAreaOffset": 3106,
+    # Past the zone-area / button-area-group arrays, the installer
+    # section continues (clsHAC.cs:3290-3416). Offsets derived from the
+    # OMNI_PRO_II CAP constants — numConsoles=16, numTstats=64,
+    # numDCMCodes=16, numMessageGroups=16, numSerialPorts=6 (→4 rates),
+    # numSCI+numUART=5 (→3 protocols) — and the feature set
+    # (SuperviseBell + SuperviseExteriorSounder + ZoneResistors +
+    # Addressable + UPB all present, contributing 9 conditional bytes
+    # before ReportBypassRestore). Verified empirically:
+    #   3298..3313: Consoles[1..16].Area
+    #   3314..3329: Consoles[1..16].Global
+    #   3330..3393: Thermostats[1..64].Areas (area-membership bitmask)
+    #   3394: TimeAdj / 3395: AlarmResetTime / 3396: ArmingConfirmation
+    #   3397..3460: Thermostats[1..64].Type (enuThermostatType)
+    #   ... DCM open/close codes, message groups, serial config,
+    #       feature-conditional fields, area exit/unvacated flags ...
+    #   3552: CrossZoneTimer (boundary canary = 60)
+    #   3553..3728: Zones[1..176].ZoneOptions (raw options byte, default 4)
+    "thermostatAreasOffset": 3330,
+    "thermostatTypeOffset": 3397,
+    "zoneOptionsOffset": 3553,
     # Unit index ranges → unit type derivation. Per CAP for OMNI_PRO_II:
     "firstX10": 1, "lastX10": 256,
     "firstExpEncOut": 257, "lastExpEncOut": 384,
@@ -836,6 +873,9 @@ class _ConnectionWalk:
     message_names: dict[int, str] = field(default_factory=dict)
     zone_types: dict[int, int] = field(default_factory=dict)
     zone_areas: dict[int, int] = field(default_factory=dict)
+    zone_options: dict[int, int] = field(default_factory=dict)
+    thermostat_types: dict[int, int] = field(default_factory=dict)
+    thermostat_areas: dict[int, int] = field(default_factory=dict)
     area_entry_delays: dict[int, int] = field(default_factory=dict)
     area_exit_delays: dict[int, int] = field(default_factory=dict)
     area_entry_chime: dict[int, bool] = field(default_factory=dict)
@@ -944,6 +984,25 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         if za_end <= len(setup_data):
             for slot in range(1, cap["max_zones"] + 1):
                 zone_areas[slot] = setup_data[za_off + slot - 1]
+
+    zo_off = cap.get("zoneOptionsOffset")
+    zone_options: dict[int, int] = {}
+    if zo_off is not None and zo_off + cap["max_zones"] <= len(setup_data):
+        for slot in range(1, cap["max_zones"] + 1):
+            zone_options[slot] = setup_data[zo_off + slot - 1]
+
+    # Per-thermostat type + area assignment (64 slots on OMNI_PRO_II).
+    n_tstats = cap.get("max_tstats", 0)
+    tt_off = cap.get("thermostatTypeOffset")
+    thermostat_types: dict[int, int] = {}
+    if tt_off is not None and tt_off + n_tstats <= len(setup_data):
+        for slot in range(1, n_tstats + 1):
+            thermostat_types[slot] = setup_data[tt_off + slot - 1]
+    tha_off = cap.get("thermostatAreasOffset")
+    thermostat_areas: dict[int, int] = {}
+    if tha_off is not None and tha_off + n_tstats <= len(setup_data):
+        for slot in range(1, n_tstats + 1):
+            thermostat_areas[slot] = setup_data[tha_off + slot - 1]
 
     # Per-area entry/exit delays from the user section.
     num_areas = cap.get("max_areas", 0)
@@ -1252,6 +1311,9 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         message_names=message_names,
         zone_types=zone_types,
         zone_areas=zone_areas,
+        zone_options=zone_options,
+        thermostat_types=thermostat_types,
+        thermostat_areas=thermostat_areas,
         area_entry_delays=area_entry_delays,
         area_exit_delays=area_exit_delays,
         area_entry_chime=area_entry_chime,
@@ -1394,6 +1456,9 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.message_names = walk.message_names
     account.zone_types = walk.zone_types
     account.zone_areas = walk.zone_areas
+    account.zone_options = walk.zone_options
+    account.thermostat_types = walk.thermostat_types
+    account.thermostat_areas = walk.thermostat_areas
     account.area_entry_delays = walk.area_entry_delays
     account.area_exit_delays = walk.area_exit_delays
     account.area_entry_chime = walk.area_entry_chime

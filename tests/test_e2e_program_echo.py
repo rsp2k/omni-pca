@@ -475,6 +475,20 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     # zones in area 1.
     for slot, zone in state.zones.items():
         assert zone.area == 1, f"slot {slot} expected area=1 got {zone.area}"
+    # ZoneOptions — every zone carries the panel-default 4 in this fixture.
+    for slot, zone in state.zones.items():
+        assert zone.options == 4, f"slot {slot} expected options=4 got {zone.options}"
+    assert all(v == 4 for v in acct.zone_options.values())
+    assert len(acct.zone_options) == 176
+
+    # Thermostat type + area from SetupData. The two named thermostats
+    # (DOWNSTAIRS, UPSTAIRS) are type 1; areas were 0xFF (all) →
+    # normalised to area 1 only in MockState.
+    assert acct.thermostat_types[1] == 1
+    assert acct.thermostat_types[2] == 1
+    assert len(acct.thermostat_types) == 64
+    assert state.thermostats[1].thermostat_type == 1
+    assert state.thermostats[1].areas == 0x01
 
     panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
     async with panel.serve(transport="tcp") as (host, port):
