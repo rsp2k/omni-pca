@@ -2,6 +2,33 @@
 
 All notable changes to this project. Date-based versioning ([CalVer](https://calver.org/), `YYYY.M.D`); each release date corresponds to a backwards-incompatible boundary.
 
+## [2026.5.14] — 2026-05-14
+
+HACS publishing release — brand assets and validation tooling.
+
+### Home Assistant integration
+
+- `brand/icon.png` (256×256) + `brand/icon@2x.png` (512×512) shipped inline at `custom_components/omni_pca/brand/` for the HA 2026.3 brands-proxy API.
+- WebSocket commands + side-panel registration for an in-HA custom panel surfacing decoded programs.
+- `program_renderer`: structured-English token streams for the HA UI to render conditional logic.
+- `program_engine`: real AND/OR condition evaluator (StateEvaluator decodes records against MockState; replaces the always-passes-AND/always-fails-OR stub).
+- `program_engine`: EVENT programs + event taxonomy (Phase 4), clausal chains WHEN/AT/EVERY + AND/OR/THEN (Phase 5).
+- `__init__.py`: `CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)` to satisfy hassfest.
+- `manifest.json`: keys sorted (domain, name, then alphabetical), HTML/markdown removed from i18n strings.
+- Canonical URLs switched to `github.com/rsp2k/omni-pca` (was Gitea-only).
+
+### Library
+
+- `pca_file.py`: progressive `SetupData` decoding — zone types, area assignments, entry/exit delays, temperature format, code PINs, installer/PCAccess codes, perimeter chime, audible exit delay, DST, house code format, time clocks, latitude/longitude/timezone, account remarks extended, 9 per-family description tables, zone options, thermostat type + areas, time_adj / alarm_reset_time / arming_confirmation / two_way_audio scalars.
+- `iter_programs()` for both v1 (UDP) and v2 (TCP) wire dialects.
+- `mock_panel`: v1 `UploadPrograms` streaming + program-echo tests; `MockState.from_pca()` builds state from a real `.pca`.
+- `programs`: multi-record decoder properties (firmware ≥3.0 records), structured-OP AND decoder properties, AND-record u16 fields documented as big-endian on disk.
+
+### CI / packaging
+
+- `.github/workflows/validate.yml`: HACS action + hassfest on push / PR / weekly.
+- `pyproject.toml`: full `[project.urls]` with Repository / Issues / Changelog / Documentation.
+
 ## [2026.5.10] — 2026-05-10
 
 First release. Working library + Home Assistant custom component, validated end-to-end against an in-process mock panel and a real HA instance running in Docker. Not yet validated against a live panel because the user's panel's network module is currently off.
@@ -82,4 +109,5 @@ First release. Working library + Home Assistant custom component, validated end-
 - **PyPI publish**: `omni-pca` not yet on PyPI; HA `manifest.json` requirements line will only resolve once it is. For now users either install the wheel manually or pip-install from a Git URL.
 - **HACS submission**: pending live-panel validation.
 
+[2026.5.14]: https://github.com/rsp2k/omni-pca/releases/tag/v2026.5.14
 [2026.5.10]: https://github.com/rsp2k/omni-pca/releases/tag/v2026.5.10

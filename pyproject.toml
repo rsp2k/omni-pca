@@ -1,6 +1,6 @@
 [project]
 name = "omni-pca"
-version = "2026.5.11"
+version = "2026.5.14"
 description = "Async Python client for HAI/Leviton Omni-Link II home automation panels (Omni Pro II, Omni IIe, Omni LTe, Lumina)."
 readme = "README.md"
 license = { text = "MIT" }
