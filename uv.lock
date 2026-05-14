@@ -1522,6 +1522,9 @@ cli = [
     { name = "rich" },
     { name = "typer" },
 ]
+engine = [
+    { name = "astral" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1537,11 +1540,12 @@ ha = [
 
 [package.metadata]
 requires-dist = [
+    { name = "astral", marker = "extra == 'engine'", specifier = ">=2.2,<3" },
     { name = "cryptography", specifier = ">=44.0.0" },
     { name = "rich", marker = "extra == 'cli'", specifier = ">=13.9.0" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.15.0" },
 ]
-provides-extras = ["cli"]
+provides-extras = ["cli", "engine"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -1,0 +1,444 @@
+"""Autonomous execution engine for HAI Omni panel programs.
+
+The :mod:`omni_pca.mock_panel` module turns ``MockState`` into a
+wire-speaking *replay* of a panel: clients ask for properties, names,
+programs, and the mock serves what's on disk. The engine in this
+module is the next layer — it interprets the decoded :class:`Program`
+records as **automation rules** and fires them autonomously over time,
+mutating ``MockState`` the same way a real panel firmware would.
+
+Architecture
+------------
+
+The engine is decoupled from real wall-time via a :class:`Clock`
+protocol so tests can fast-forward through schedules without waiting
+for real seconds to elapse. Two implementations ship:
+
+* :class:`RealClock` — the production engine. ``now()`` returns
+  ``datetime.now()`` and ``sleep_until()`` does ``asyncio.sleep``.
+* :class:`FakeClock` — for tests. ``now()`` returns the manually-set
+  current time and ``sleep_until()`` returns immediately after
+  recording the target. Tests then call ``advance_to(target)`` to
+  jump the clock forward and let pending sleepers wake up.
+
+Program-type coverage is built up in phases:
+
+* Phase 1 (this module's initial cut) — skeleton + Clock + the
+  classifier that splits :class:`Program` records into "schedulable
+  by time", "event-triggered", and "clausal head" categories.
+* Phase 2 — TIMED program execution.
+* Phase 3 — YEARLY + sunrise/sunset via :mod:`astral`.
+* Phase 4 — EVENT program routing.
+* Phase 5 — full clausal evaluator for firmware-3.0 multi-record
+  WHEN/AT/EVERY + AND/OR/THEN chains.
+
+The engine never touches the wire directly. All state mutations go
+through :meth:`MockPanel._apply_unit_command` (and siblings), which
+are the same code paths the v2 ``Command`` opcode handler uses — so
+"engine fires a TIMED program that turns on unit 5" and "client sends
+``Command(UNIT_ON, 5)``" produce identical results.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
+from typing import TYPE_CHECKING
+
+from .programs import Days, Program, ProgramType, TimeKind
+
+_log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .mock_panel import MockPanel
+
+
+# --------------------------------------------------------------------------
+# Clock abstraction
+# --------------------------------------------------------------------------
+
+
+class Clock(ABC):
+    """Abstract source of "what time is it" + delay scheduling.
+
+    Implementations decide whether ``sleep_until`` is a real
+    ``asyncio.sleep`` or a deterministic no-op that defers to a manual
+    advance call. The engine never references ``datetime.now()`` or
+    ``asyncio.sleep`` directly — it always goes through the Clock.
+    """
+
+    @abstractmethod
+    def now(self) -> datetime: ...
+
+    @abstractmethod
+    async def sleep_until(self, target: datetime) -> None: ...
+
+
+class RealClock(Clock):
+    """Production clock — wall-time + asyncio.sleep."""
+
+    def now(self) -> datetime:
+        return datetime.now(tz=timezone.utc)
+
+    async def sleep_until(self, target: datetime) -> None:
+        delay = (target - self.now()).total_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+@dataclass
+class _PendingSleeper:
+    """A coroutine waiting for the FakeClock to reach ``target``."""
+
+    target: datetime
+    event: asyncio.Event
+
+
+class FakeClock(Clock):
+    """Deterministic clock for tests.
+
+    ``advance_to(t)`` jumps wall-time forward and wakes any sleepers
+    whose ``target <= t``. Multiple sleepers can wait concurrently —
+    they wake in target order.
+
+    Example:
+
+        clock = FakeClock(datetime(2026, 5, 14, 22, 29, tzinfo=timezone.utc))
+        engine = ProgramEngine(panel, clock=clock)
+        await engine.start()
+        # No real seconds pass:
+        await clock.advance_to(datetime(2026, 5, 14, 22, 31, tzinfo=timezone.utc))
+        # By now any TIMED program scheduled for 22:30 has fired.
+    """
+
+    def __init__(self, initial: datetime) -> None:
+        if initial.tzinfo is None:
+            raise ValueError("FakeClock requires a timezone-aware initial datetime")
+        self._now = initial
+        self._sleepers: list[_PendingSleeper] = []
+
+    def now(self) -> datetime:
+        return self._now
+
+    async def sleep_until(self, target: datetime) -> None:
+        if target <= self._now:
+            return
+        sleeper = _PendingSleeper(target=target, event=asyncio.Event())
+        self._sleepers.append(sleeper)
+        await sleeper.event.wait()
+
+    async def advance_to(self, target: datetime) -> None:
+        """Jump clock to ``target``, waking any sleepers whose target is in
+        the past after the jump. Sleepers wake in chronological order so
+        a TIMED program scheduled for 06:00 wakes before one at 07:00
+        even if we advance straight to 08:00."""
+        if target < self._now:
+            raise ValueError("FakeClock can only move forward")
+        self._now = target
+        # Wake sleepers whose target has now passed, in chronological order.
+        ready = sorted(
+            (s for s in self._sleepers if s.target <= self._now),
+            key=lambda s: s.target,
+        )
+        for sleeper in ready:
+            self._sleepers.remove(sleeper)
+            sleeper.event.set()
+        # Yield once per ready sleeper so each one's coroutine runs to
+        # its next suspension point before we return.
+        for _ in ready:
+            await asyncio.sleep(0)
+
+
+# --------------------------------------------------------------------------
+# Program classification
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ClassifiedPrograms:
+    """Programs sorted into execution buckets.
+
+    ``timed`` / ``event`` / ``yearly`` carry compact-form Programs whose
+    behaviour is decoded directly from the single 14-byte record.
+    ``clausal_heads`` are WHEN/AT/EVERY records that begin a multi-record
+    chain; the engine resolves the chain (via following AND/OR/THEN
+    records in the same slot range) when it loads them in phase 5.
+    """
+
+    timed: tuple[Program, ...] = ()
+    event: tuple[Program, ...] = ()
+    yearly: tuple[Program, ...] = ()
+    clausal_heads: tuple[Program, ...] = ()
+
+
+def classify(programs: tuple[Program, ...]) -> _ClassifiedPrograms:
+    """Split a Program tuple by execution kind.
+
+    Empty / unknown / FREE / REMARK records are dropped — they have no
+    runtime behaviour. Clausal AND/OR/THEN records are *also* dropped at
+    this stage; the engine reaches them by walking forward from each
+    WHEN/AT/EVERY head, not by classifying them independently.
+    """
+    timed: list[Program] = []
+    event: list[Program] = []
+    yearly: list[Program] = []
+    clausal: list[Program] = []
+    for p in programs:
+        if p.is_empty():
+            continue
+        try:
+            kind = ProgramType(p.prog_type)
+        except ValueError:
+            continue
+        if kind == ProgramType.TIMED:
+            timed.append(p)
+        elif kind == ProgramType.EVENT:
+            event.append(p)
+        elif kind == ProgramType.YEARLY:
+            yearly.append(p)
+        elif kind in (ProgramType.WHEN, ProgramType.AT, ProgramType.EVERY):
+            clausal.append(p)
+        # FREE (0) / REMARK (4) / AND / OR / THEN — not scheduled directly.
+    return _ClassifiedPrograms(
+        timed=tuple(timed),
+        event=tuple(event),
+        yearly=tuple(yearly),
+        clausal_heads=tuple(clausal),
+    )
+
+
+# --------------------------------------------------------------------------
+# TIMED scheduling
+# --------------------------------------------------------------------------
+
+
+# Omni's day-of-week bitmask maps bits 1..7 (LSB unused) to Mon..Sun.
+# Python's datetime.weekday() returns Mon=0..Sun=6. We need a lookup.
+_PYWEEKDAY_TO_DAYS_BIT: tuple[Days, ...] = (
+    Days.MONDAY,
+    Days.TUESDAY,
+    Days.WEDNESDAY,
+    Days.THURSDAY,
+    Days.FRIDAY,
+    Days.SATURDAY,
+    Days.SUNDAY,
+)
+
+
+def _matches_days_mask(d: date, mask: int) -> bool:
+    """Return True iff ``d``'s weekday is enabled in the Omni Days bitmask.
+
+    Mask 0 (no days set) never matches — TIMED programs with empty
+    Days masks are effectively disabled, matching real-panel behaviour.
+    """
+    if mask == 0:
+        return False
+    return bool(int(_PYWEEKDAY_TO_DAYS_BIT[d.weekday()]) & mask)
+
+
+def _next_absolute_fire(now: datetime, program: Program) -> datetime | None:
+    """Compute the next datetime ``program`` (assumed TIMED, ABSOLUTE
+    TimeKind) should fire, strictly after ``now``.
+
+    Returns ``None`` if the program's Days mask is empty — it never fires.
+    """
+    if program.time_kind != TimeKind.ABSOLUTE:
+        return None  # SUNRISE/SUNSET-relative handled by Phase 3.
+    if program.days == 0:
+        return None
+    # Snap to the program's hour:minute today (in the clock's tz),
+    # then walk forward up to 8 days looking for the next matching weekday.
+    base = now.replace(
+        hour=program.hour, minute=program.minute,
+        second=0, microsecond=0,
+    )
+    for offset in range(0, 8):
+        candidate = base + timedelta(days=offset)
+        if candidate <= now:
+            continue
+        if _matches_days_mask(candidate.date(), program.days):
+            return candidate
+    return None  # safety net — shouldn't happen if mask is non-zero
+
+
+def _command_payload(program: Program) -> bytes:
+    """Build the 4-byte Command wire payload from a Program record.
+
+    The wire format (clsOL2MsgCommand.cs) is identical between the v2
+    Command opcode and what the panel firmware fires internally for a
+    TIMED program — so feeding this to ``MockPanel._handle_command``
+    has exactly the same state-mutation effect as a client sending
+    the equivalent Command.
+    """
+    return bytes(
+        [
+            program.cmd & 0xFF,
+            program.par & 0xFF,
+            (program.pr2 >> 8) & 0xFF,
+            program.pr2 & 0xFF,
+        ]
+    )
+
+
+# --------------------------------------------------------------------------
+# Engine
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class _EngineMetrics:
+    """Lightweight counters useful in tests + diagnostics."""
+
+    timed_fired: int = 0
+    event_fired: int = 0
+    yearly_fired: int = 0
+    clausal_fired: int = 0
+    errors: int = 0
+
+
+class ProgramEngine:
+    """Run a panel's programs autonomously against a :class:`MockPanel`.
+
+    Phase 1 (this skeleton) classifies the programs and stands up the
+    asyncio task harness but doesn't fire anything yet. Subsequent
+    phases plug in TIMED / YEARLY / EVENT / clausal execution.
+
+    Lifecycle::
+
+        engine = ProgramEngine(panel, clock=FakeClock(t0))
+        await engine.start()        # spawns the per-bucket tasks
+        ...                          # tests advance the clock / emit events
+        await engine.stop()         # cancels and awaits all tasks
+
+    The engine is safe to instantiate without ever calling ``start`` —
+    the classification work happens up front but no tasks spawn until
+    explicit start.
+    """
+
+    def __init__(self, panel: "MockPanel", *, clock: Clock | None = None) -> None:
+        self._panel = panel
+        self._clock = clock or RealClock()
+        # Decode raw bytes from MockState.programs into Program objects
+        # once, at construction. Reclassifying on every start would be
+        # wasteful and would also lose the slot indices.
+        decoded: list[Program] = []
+        for slot, raw in panel.state.programs.items():
+            try:
+                decoded.append(Program.from_wire_bytes(raw, slot=slot))
+            except Exception:
+                # Malformed records are skipped, not fatal. The engine
+                # carries on with whatever is decodable.
+                continue
+        self._programs: tuple[Program, ...] = tuple(decoded)
+        self._classified = classify(self._programs)
+        self._tasks: list[asyncio.Task[None]] = []
+        self._running = False
+        self.metrics = _EngineMetrics()
+
+    # ---- inspection -------------------------------------------------------
+
+    @property
+    def clock(self) -> Clock:
+        """The clock this engine is driven by."""
+        return self._clock
+
+    @property
+    def classified(self) -> _ClassifiedPrograms:
+        """Programs split into execution buckets. Useful in tests to
+        confirm the engine sees what you expect."""
+        return self._classified
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    # ---- lifecycle --------------------------------------------------------
+
+    async def start(self) -> None:
+        """Begin executing programs in the background.
+
+        Idempotent — calling start on a running engine is a no-op.
+        """
+        if self._running:
+            return
+        self._running = True
+        # Phase 2: one worker task per TIMED program.
+        for program in self._classified.timed:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._run_timed_program(program),
+                    name=f"omni-pca-timed-slot-{program.slot}",
+                )
+            )
+
+    async def _run_timed_program(self, program: Program) -> None:
+        """Sleep-until-next-fire loop for one TIMED program.
+
+        Wakes at the program's scheduled hour:minute on the next
+        matching weekday, fires the command, then loops to the next
+        occurrence. Returns when the engine stops (task cancellation).
+        """
+        try:
+            while self._running:
+                next_fire = _next_absolute_fire(self._clock.now(), program)
+                if next_fire is None:
+                    return  # no valid Days mask — give up on this program
+                await self._clock.sleep_until(next_fire)
+                if not self._running:
+                    return
+                await self._fire(program)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception(
+                "engine: TIMED slot %s crashed", program.slot,
+            )
+            self.metrics.errors += 1
+
+    async def _fire(self, program: Program) -> None:
+        """Execute one program by feeding its command through the same
+        wire-handler path the v2 Command opcode uses."""
+        try:
+            self._panel._handle_command(_command_payload(program))
+        except Exception:
+            _log.exception(
+                "engine: firing slot %s (cmd=%d par=%d pr2=%d) raised",
+                program.slot, program.cmd, program.par, program.pr2,
+            )
+            self.metrics.errors += 1
+            return
+        kind = ProgramType(program.prog_type)
+        if kind == ProgramType.TIMED:
+            self.metrics.timed_fired += 1
+        elif kind == ProgramType.EVENT:
+            self.metrics.event_fired += 1
+        elif kind == ProgramType.YEARLY:
+            self.metrics.yearly_fired += 1
+        else:
+            self.metrics.clausal_fired += 1
+
+    async def stop(self) -> None:
+        """Cancel all engine-spawned tasks and wait for them to exit.
+
+        Idempotent."""
+        if not self._running:
+            return
+        self._running = False
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._tasks.clear()
+
+    async def __aenter__(self) -> "ProgramEngine":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.stop()

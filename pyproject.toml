@@ -24,6 +24,11 @@ dependencies = [
 
 [project.optional-dependencies]
 cli = ["rich>=13.9.0", "typer>=0.15.0"]
+# astral provides sunrise/sunset computation for the program engine's
+# AT_SUNRISE / AT_SUNSET TIMED-program sentinels. Pure Python, MIT.
+# Pinned to 2.2 for compatibility with Home Assistant (which pins it
+# to exactly that version) so the `ha` group still resolves.
+engine = ["astral>=2.2,<3"]
 
 [project.scripts]
 omni-pca = "omni_pca.__main__:main"
