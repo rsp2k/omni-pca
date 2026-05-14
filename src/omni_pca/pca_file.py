@@ -280,6 +280,21 @@ class PcaAccount:
     thermostat_types: dict[int, int] = field(default_factory=dict)
     thermostat_areas: dict[int, int] = field(default_factory=dict)
 
+    # Four more SetupData scalars sandwiched around the thermostat arrays:
+    #   time_adj — minutes past midnight when the panel applies its daily
+    #     clock-drift adjustment (range 1..59, default 30)
+    #   alarm_reset_time — seconds the panel waits before allowing
+    #     re-arming after an alarm clears (1..30 default 6 on standard
+    #     panels, 30..60/30 on EURO EN50131 panels)
+    #   arming_confirmation — whether the panel beeps to acknowledge
+    #     successful arming (bool, default False)
+    #   two_way_audio — whether the panel routes two-way audio to the
+    #     central station during alarms (bool, default False)
+    time_adj: int = 0
+    alarm_reset_time: int = 0
+    arming_confirmation: bool = False
+    two_way_audio: bool = False
+
     # Per-area entry/exit delay (seconds) from SetupData user section.
     # Keys are 1-based area numbers (1..numAreas); typical values are
     # 30/60 (entry) and 60/90 (exit). Unused areas carry the panel
@@ -652,7 +667,17 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     #   3552: CrossZoneTimer (boundary canary = 60)
     #   3553..3728: Zones[1..176].ZoneOptions (raw options byte, default 4)
     "thermostatAreasOffset": 3330,
+    # Three single-byte scalars sandwiched between Thermostat.Areas[64]
+    # and Thermostat.Type[64] (clsHAC.cs:3303-3314):
+    #   3394: TimeAdj (range 1..59, default 30)
+    #   3395: AlarmResetTime (range 1..30 default 6; 30..60/30 on EURO)
+    #   3396: ArmingConfirmation (bool, default false)
+    "timeAdjOffset": 3394,
+    "alarmResetTimeOffset": 3395,
+    "armingConfirmationOffset": 3396,
     "thermostatTypeOffset": 3397,
+    # TwoWayAudio (bool) sits immediately after Thermostat.Type[64].
+    "twoWayAudioOffset": 3461,
     "zoneOptionsOffset": 3553,
     # Unit index ranges → unit type derivation. Per CAP for OMNI_PRO_II:
     "firstX10": 1, "lastX10": 256,
@@ -876,6 +901,10 @@ class _ConnectionWalk:
     zone_options: dict[int, int] = field(default_factory=dict)
     thermostat_types: dict[int, int] = field(default_factory=dict)
     thermostat_areas: dict[int, int] = field(default_factory=dict)
+    time_adj: int = 0
+    alarm_reset_time: int = 0
+    arming_confirmation: bool = False
+    two_way_audio: bool = False
     area_entry_delays: dict[int, int] = field(default_factory=dict)
     area_exit_delays: dict[int, int] = field(default_factory=dict)
     area_entry_chime: dict[int, bool] = field(default_factory=dict)
@@ -1094,6 +1123,12 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
                 break
             chars.append(chr(setup_data[pos]))
         return "".join(chars)
+
+    # Four scalars sandwiched around the thermostat arrays.
+    time_adj = _read_scalar_byte("timeAdjOffset")
+    alarm_reset_time = _read_scalar_byte("alarmResetTimeOffset")
+    arming_confirmation = _read_bool("armingConfirmationOffset")
+    two_way_audio = _read_bool("twoWayAudioOffset")
 
     # Telephony / dialer scalars + the panel's outgoing phone number.
     telephone_access = _read_bool("telephoneAccessOffset")
@@ -1314,6 +1349,10 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         zone_options=zone_options,
         thermostat_types=thermostat_types,
         thermostat_areas=thermostat_areas,
+        time_adj=time_adj,
+        alarm_reset_time=alarm_reset_time,
+        arming_confirmation=arming_confirmation,
+        two_way_audio=two_way_audio,
         area_entry_delays=area_entry_delays,
         area_exit_delays=area_exit_delays,
         area_entry_chime=area_entry_chime,
@@ -1459,6 +1498,10 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.zone_options = walk.zone_options
     account.thermostat_types = walk.thermostat_types
     account.thermostat_areas = walk.thermostat_areas
+    account.time_adj = walk.time_adj
+    account.alarm_reset_time = walk.alarm_reset_time
+    account.arming_confirmation = walk.arming_confirmation
+    account.two_way_audio = walk.two_way_audio
     account.area_entry_delays = walk.area_entry_delays
     account.area_exit_delays = walk.area_exit_delays
     account.area_entry_chime = walk.area_entry_chime

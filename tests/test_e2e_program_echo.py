@@ -490,6 +490,12 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert state.thermostats[1].thermostat_type == 1
     assert state.thermostats[1].areas == 0x01
 
+    # Four scalars sandwiched around the thermostat arrays.
+    assert acct.time_adj == 30              # panel default
+    assert 1 <= acct.alarm_reset_time <= 30  # in valid standard range
+    assert acct.arming_confirmation is False
+    assert acct.two_way_audio is False
+
     panel = MockPanel(controller_key=CONTROLLER_KEY, state=state)
     async with panel.serve(transport="tcp") as (host, port):
         async with OmniClient(
