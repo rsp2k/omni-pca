@@ -430,6 +430,30 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
     assert 67 <= acct.longitude <= 125    # continental US long range
     assert acct.time_zone in (5, 6, 7, 8, 9, 10)  # US zones EST..AKST
 
+    # Telephony / dialer scalars + the panel's own number (PII).
+    assert acct.telephone_access is True
+    assert acct.rings_before_answer == 8
+    assert acct.my_phone_number != ""        # a real number is set
+    assert "my_phone_number" not in repr(acct)  # but never in repr
+    assert acct.callback_number == "-"       # blank-number sentinel
+
+    # Misc panel scalars.
+    assert acct.house_code == 1              # base X10 house code A
+    assert acct.num_thermostats == 64        # OMNI_PRO_II thermostat cap
+    assert acct.flash_light_num == 2         # X10 unit flashed on alarm
+    assert acct.verify_fire_alarms is True
+    assert acct.enable_console_emg is True
+    assert acct.high_security is False
+
+    # DCM dialer block — not configured for monitoring in this fixture
+    # ("-" blank phone numbers) but the per-zone alarm-code table and
+    # emergency codes are still populated.
+    assert acct.dcm.phone_number_1 == "-"
+    assert "phone_number_1" not in repr(acct.dcm)  # PII repr=False
+    assert len(acct.dcm.zone_alarm_codes) == 176
+    assert len(acct.dcm.emergency_codes) == 8
+    assert all(0 <= c <= 255 for c in acct.dcm.emergency_codes)
+
     # Codes: PINs decode as BE u16. PII fields not in repr().
     assert acct.code_authority[1] == 1   # COMPUTER → User
     assert acct.code_authority[4] == 2   # Debra → Manager

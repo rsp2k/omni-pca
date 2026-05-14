@@ -372,6 +372,53 @@ class PcaAccount:
     temp_format: int = 0
     num_areas_used: int = 0
 
+    # Telephony / dialer configuration. ``my_phone_number`` is the
+    # panel's own outgoing line — PII, so ``repr=False``.
+    # ``dial_mode`` is raw enuDialMode (0=Tone, 1=Pulse). ``"-"`` in
+    # the phone-number strings is the panel's "blank number" sentinel.
+    telephone_access: bool = False
+    answer_outside_call: bool = False
+    remote_commands_ok: bool = False
+    rings_before_answer: int = 0
+    dial_mode: int = 0
+    my_phone_number: str = field(default="", repr=False)
+    callback_number: str = field(default="", repr=False)
+
+    # Misc panel-wide scalars from SetupData.
+    #   high_security / freeze_alarm / announce_alarms — bool toggles
+    #   flash_light_num — X10 unit number flashed during an alarm
+    #   house_code — base X10 house code (1=A, 2=B, …)
+    #   zone_expansions / num_exp_enc — expansion-module counts
+    #   num_thermostats — configured thermostat count
+    #   exterior_horn_delay / dialout_delay — seconds
+    #   verify_fire_alarms / enable_console_emg — bool toggles
+    #   time_format / date_format — raw enuTimeFormat / enuDateFormat
+    #   ac_power_freq — raw enuFrequency (mains Hz selector)
+    #   dead_line_detect / off_hook_detect — phone-line monitoring
+    high_security: bool = False
+    freeze_alarm: bool = False
+    flash_light_num: int = 0
+    announce_alarms: bool = False
+    house_code: int = 0
+    zone_expansions: int = 0
+    num_exp_enc: int = 0
+    num_thermostats: int = 0
+    exterior_horn_delay: int = 0
+    dialout_delay: int = 0
+    verify_fire_alarms: bool = False
+    enable_console_emg: bool = False
+    time_format: int = 0
+    date_format: int = 0
+    ac_power_freq: int = 0
+    dead_line_detect: int = 0
+    off_hook_detect: int = 0
+
+    # Digital Communicator Module (alarm-dialer) block — see DcmConfig.
+    # default_factory is a lambda because DcmConfig is defined further
+    # down the module (alongside TimeClock); the lambda defers the name
+    # lookup to instance-construction time when it's resolvable.
+    dcm: "DcmConfig" = field(default_factory=lambda: DcmConfig())
+
 
 def parse_pca01_cfg(data: bytes, key: int = KEY_PC01) -> PcaConfig:
     """Decrypt ``data`` (raw PCA01.CFG bytes) and parse per clsPcaCfg.Read()."""
@@ -523,9 +570,46 @@ _CAP_OMNI_PRO_II: dict[str, int] = {
     #
     # Hardcoded for OMNI_PRO_II — other panels will need their own values.
     "instSetupStart": 2560,
+    "houseCodeOffset": 2560,
+    "outputTypeOffset": 2561,       # OutputType[0..8] (9 bytes; numVoltOutputs)
+    "zoneExpansionsOffset": 2570,
+    "numExpEncOffset": 2571,
     "zoneTypeOffset": 2572,
+    # DCM (Digital Communicator Module) dialer block.
+    "dcmPhone1Offset": 2748,        # 25-byte fixed-width string
+    "dcmAccount1Offset": 2773,      # BE u16
+    "dcmPhone2Offset": 2775,
+    "dcmAccount2Offset": 2800,
+    "dcmTypeOffset": 2802,
+    "dcmTestTimeOffset": 2803,      # 5-byte clsWhen
+    "dcmTestCodeOffset": 2808,
+    "dcmZoneAlarmCodesOffset": 2809,  # 176 bytes, one per zone
+    "dcmEmergencyCodesOffset": 2985,  # 8 bytes: Freeze/Fire/Police/Aux/Duress/Batt/FireZone/Cancel
     "tempFormatOffset": 2993,
+    "numThermostatsOffset": 2994,
+    "callBackNumberOffset": 3000,   # 25-byte fixed-width string
+    "exteriorHornDelayOffset": 3025,
+    "dialoutDelayOffset": 3026,
+    "verifyFireAlarmsOffset": 3027,
+    "enableConsoleEmgOffset": 3028,
+    "timeFormatOffset": 3029,
+    "dateFormatOffset": 3030,
+    "acPowerFreqOffset": 3031,
+    "deadLineDetectOffset": 3032,
+    "offHookDetectOffset": 3033,
     "numAreasUsedOffset": 3034,
+    # User-section head: telephony flags + MyPhoneNumber.
+    "telephoneAccessOffset": 1,
+    "answerOutsideCallOffset": 2,
+    "remoteCommandsOkOffset": 3,
+    "ringsBeforeAnswerOffset": 4,
+    "dialModeOffset": 5,
+    "myPhoneNumberOffset": 6,        # 25-byte fixed-width string
+    # Misc user-section scalars after the 5 contiguous area flags.
+    "highSecurityOffset": 1827,
+    "freezeAlarmOffset": 1828,
+    "flashLightNumOffset": 1829,     # BE u16 (HI+LO; lastX10>255)
+    "announceAlarmsOffset": 1896,
     # AreaGroups arrays per family — each byte is an 8-bit area-membership
     # bitmask covering one or more units, sized via the CAP ranges:
     "x10AreaGroupsOffset": 3035,      # (lastX10-firstX10+16)/16 = 16 bytes, 1 group/16 units
@@ -696,6 +780,41 @@ class TimeClock:
 
 
 @dataclass
+class DcmConfig:
+    """Digital Communicator Module (alarm-dialer) configuration.
+
+    The DCM reports alarm events to a central monitoring station. All
+    fields come from the SetupData installer section (clsHAC.cs:3185-3208).
+
+    * ``phone_number_1`` / ``phone_number_2`` — primary / backup dialer
+      numbers. PII (``repr=False``); ``"-"`` is the panel's "blank
+      number" sentinel.
+    * ``account_1`` / ``account_2`` — BE u16 account identifiers the
+      monitoring station uses. 0xAAAA is the uninitialised default.
+    * ``dcm_type`` — raw ``enuDCMType`` byte (the reporting protocol —
+      Contact ID, 2300-baud, etc.).
+    * ``test_time`` — scheduled supervisory-test call (a ``TimeClock``;
+      all-zero means no test schedule).
+    * ``test_code`` — event code sent on the supervisory test call.
+    * ``zone_alarm_codes`` — ``{1-based zone: code byte}`` reported when
+      that zone alarms.
+    * ``emergency_codes`` — 8 event codes in the fixed order
+      Freeze, FireEmg, PoliceEmg, AuxEmg, Duress, BatteryLow,
+      FireZoneTrouble, Cancel.
+    """
+
+    phone_number_1: str = field(default="", repr=False)
+    account_1: int = 0
+    phone_number_2: str = field(default="", repr=False)
+    account_2: int = 0
+    dcm_type: int = 0
+    test_time: TimeClock = field(default_factory=lambda: TimeClock(0, 0, 0, 0, 0))
+    test_code: int = 0
+    zone_alarm_codes: dict[int, int] = field(default_factory=dict)
+    emergency_codes: tuple[int, ...] = ()
+
+
+@dataclass
 class _ConnectionWalk:
     """Side-channel output of :func:`_walk_to_connection`.
 
@@ -745,6 +864,33 @@ class _ConnectionWalk:
     dst_end_week: int = 0
     temp_format: int = 0
     num_areas_used: int = 0
+    # Telephony / dialer scalars + strings.
+    telephone_access: bool = False
+    answer_outside_call: bool = False
+    remote_commands_ok: bool = False
+    rings_before_answer: int = 0
+    dial_mode: int = 0
+    my_phone_number: str = ""
+    callback_number: str = ""
+    # Misc panel scalars.
+    high_security: bool = False
+    freeze_alarm: bool = False
+    flash_light_num: int = 0
+    announce_alarms: bool = False
+    house_code: int = 0
+    zone_expansions: int = 0
+    num_exp_enc: int = 0
+    num_thermostats: int = 0
+    exterior_horn_delay: int = 0
+    dialout_delay: int = 0
+    verify_fire_alarms: bool = False
+    enable_console_emg: bool = False
+    time_format: int = 0
+    date_format: int = 0
+    ac_power_freq: int = 0
+    dead_line_detect: int = 0
+    off_hook_detect: int = 0
+    dcm: DcmConfig = field(default_factory=DcmConfig)
 
 
 def _read_name_table(r: PcaReader, count: int, name_len: int) -> dict[int, str]:
@@ -870,6 +1016,82 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         bool(setup_data[epa_off])
         if epa_off is not None and epa_off < len(setup_data)
         else False
+    )
+
+    def _read_bool(offset_key: str) -> bool:
+        return bool(_read_scalar_byte(offset_key))
+
+    def _read_hw_string(offset_key: str, max_length: int = 24) -> str:
+        """Read a clsHardwareArray.ReadString field — a fixed-width
+        ``max_length + 1`` byte slot whose content runs until the first
+        0xFF (clsHardwareArray.cs:316-325). No length prefix."""
+        off = cap.get(offset_key)
+        if off is None:
+            return ""
+        chars: list[str] = []
+        for i in range(max_length + 1):
+            pos = off + i
+            if pos >= len(setup_data) or setup_data[pos] == 0xFF:
+                break
+            chars.append(chr(setup_data[pos]))
+        return "".join(chars)
+
+    # Telephony / dialer scalars + the panel's outgoing phone number.
+    telephone_access = _read_bool("telephoneAccessOffset")
+    answer_outside_call = _read_bool("answerOutsideCallOffset")
+    remote_commands_ok = _read_bool("remoteCommandsOkOffset")
+    rings_before_answer = _read_scalar_byte("ringsBeforeAnswerOffset")
+    dial_mode = _read_scalar_byte("dialModeOffset")
+    my_phone_number = _read_hw_string("myPhoneNumberOffset")
+    callback_number = _read_hw_string("callBackNumberOffset")
+
+    # Misc panel scalars (user + installer sections).
+    high_security = _read_bool("highSecurityOffset")
+    freeze_alarm = _read_bool("freezeAlarmOffset")
+    flash_light_num = _read_be_u16("flashLightNumOffset")
+    announce_alarms = _read_bool("announceAlarmsOffset")
+    house_code = _read_scalar_byte("houseCodeOffset")
+    zone_expansions = _read_scalar_byte("zoneExpansionsOffset")
+    num_exp_enc = _read_scalar_byte("numExpEncOffset")
+    num_thermostats = _read_scalar_byte("numThermostatsOffset")
+    exterior_horn_delay = _read_scalar_byte("exteriorHornDelayOffset")
+    dialout_delay = _read_scalar_byte("dialoutDelayOffset")
+    verify_fire_alarms = _read_bool("verifyFireAlarmsOffset")
+    enable_console_emg = _read_bool("enableConsoleEmgOffset")
+    time_format = _read_scalar_byte("timeFormatOffset")
+    date_format = _read_scalar_byte("dateFormatOffset")
+    ac_power_freq = _read_scalar_byte("acPowerFreqOffset")
+    dead_line_detect = _read_scalar_byte("deadLineDetectOffset")
+    off_hook_detect = _read_scalar_byte("offHookDetectOffset")
+
+    # DCM (Digital Communicator Module) dialer block.
+    dcm_test_time_off = cap.get("dcmTestTimeOffset")
+    dcm_test_time = (
+        TimeClock.parse(setup_data[dcm_test_time_off : dcm_test_time_off + 5])
+        if dcm_test_time_off is not None
+        and dcm_test_time_off + 5 <= len(setup_data)
+        else TimeClock(0, 0, 0, 0, 0)
+    )
+    dcm_zac_off = cap.get("dcmZoneAlarmCodesOffset")
+    dcm_zone_alarm_codes: dict[int, int] = {}
+    n_zones_dcm = cap.get("max_zones", 0)
+    if dcm_zac_off is not None and dcm_zac_off + n_zones_dcm <= len(setup_data):
+        for z in range(1, n_zones_dcm + 1):
+            dcm_zone_alarm_codes[z] = setup_data[dcm_zac_off + z - 1]
+    dcm_emerg_off = cap.get("dcmEmergencyCodesOffset")
+    dcm_emergency_codes: tuple[int, ...] = ()
+    if dcm_emerg_off is not None and dcm_emerg_off + 8 <= len(setup_data):
+        dcm_emergency_codes = tuple(setup_data[dcm_emerg_off : dcm_emerg_off + 8])
+    dcm = DcmConfig(
+        phone_number_1=_read_hw_string("dcmPhone1Offset"),
+        account_1=_read_be_u16("dcmAccount1Offset"),
+        phone_number_2=_read_hw_string("dcmPhone2Offset"),
+        account_2=_read_be_u16("dcmAccount2Offset"),
+        dcm_type=_read_scalar_byte("dcmTypeOffset"),
+        test_time=dcm_test_time,
+        test_code=_read_scalar_byte("dcmTestCodeOffset"),
+        zone_alarm_codes=dcm_zone_alarm_codes,
+        emergency_codes=dcm_emergency_codes,
     )
 
     # Unit type + area assignment, per unit index.
@@ -1058,6 +1280,31 @@ def _walk_to_connection(r: PcaReader, cap: dict[str, int]) -> _ConnectionWalk:
         dst_end_week=dst_end_week,
         temp_format=temp_format,
         num_areas_used=num_areas_used,
+        telephone_access=telephone_access,
+        answer_outside_call=answer_outside_call,
+        remote_commands_ok=remote_commands_ok,
+        rings_before_answer=rings_before_answer,
+        dial_mode=dial_mode,
+        my_phone_number=my_phone_number,
+        callback_number=callback_number,
+        high_security=high_security,
+        freeze_alarm=freeze_alarm,
+        flash_light_num=flash_light_num,
+        announce_alarms=announce_alarms,
+        house_code=house_code,
+        zone_expansions=zone_expansions,
+        num_exp_enc=num_exp_enc,
+        num_thermostats=num_thermostats,
+        exterior_horn_delay=exterior_horn_delay,
+        dialout_delay=dialout_delay,
+        verify_fire_alarms=verify_fire_alarms,
+        enable_console_emg=enable_console_emg,
+        time_format=time_format,
+        date_format=date_format,
+        ac_power_freq=ac_power_freq,
+        dead_line_detect=dead_line_detect,
+        off_hook_detect=off_hook_detect,
+        dcm=dcm,
     )
 
 
@@ -1175,6 +1422,31 @@ def parse_pca_file(path_or_bytes: str | os.PathLike[str] | bytes, key: int) -> P
     account.dst_end_week = walk.dst_end_week
     account.temp_format = walk.temp_format
     account.num_areas_used = walk.num_areas_used
+    account.telephone_access = walk.telephone_access
+    account.answer_outside_call = walk.answer_outside_call
+    account.remote_commands_ok = walk.remote_commands_ok
+    account.rings_before_answer = walk.rings_before_answer
+    account.dial_mode = walk.dial_mode
+    account.my_phone_number = walk.my_phone_number
+    account.callback_number = walk.callback_number
+    account.high_security = walk.high_security
+    account.freeze_alarm = walk.freeze_alarm
+    account.flash_light_num = walk.flash_light_num
+    account.announce_alarms = walk.announce_alarms
+    account.house_code = walk.house_code
+    account.zone_expansions = walk.zone_expansions
+    account.num_exp_enc = walk.num_exp_enc
+    account.num_thermostats = walk.num_thermostats
+    account.exterior_horn_delay = walk.exterior_horn_delay
+    account.dialout_delay = walk.dialout_delay
+    account.verify_fire_alarms = walk.verify_fire_alarms
+    account.enable_console_emg = walk.enable_console_emg
+    account.time_format = walk.time_format
+    account.date_format = walk.date_format
+    account.ac_power_freq = walk.ac_power_freq
+    account.dead_line_detect = walk.dead_line_detect
+    account.off_hook_detect = walk.off_hook_detect
+    account.dcm = walk.dcm
 
     # PCA03+ continues past Connection with ModemBaud flags +
     # AccountRemarks_Extended + nine Description blocks + the Remarks
