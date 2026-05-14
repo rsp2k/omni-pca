@@ -26,6 +26,12 @@ from .const import (
 )
 from .coordinator import OmniDataUpdateCoordinator
 from .services import async_setup_services, async_unload_services
+from .websocket import (
+    async_register_side_panel,
+    async_register_websocket_commands,
+)
+
+_PANEL_REGISTERED_KEY = "_panel_registered"
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -86,6 +92,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await async_setup_services(hass)
+    # Websocket commands are global (not per-entry) but the registration
+    # helper is idempotent, so calling it for each entry is harmless.
+    async_register_websocket_commands(hass)
+    # Panel registration must happen exactly once — guard with a flag in
+    # hass.data. The flag survives entry reloads; only a full HA restart
+    # clears it (matching when HA itself would need to re-register).
+    if not hass.data[DOMAIN].get(_PANEL_REGISTERED_KEY):
+        try:
+            await async_register_side_panel(hass)
+        except Exception:
+            LOGGER.warning(
+                "omni_pca: side panel registration failed", exc_info=True,
+            )
+        hass.data[DOMAIN][_PANEL_REGISTERED_KEY] = True
     return True
 
 
