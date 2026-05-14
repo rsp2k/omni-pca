@@ -477,6 +477,135 @@ EVENT_AC_POWER_ON: int = 773
 
 
 # --------------------------------------------------------------------------
+# Clausal chains (Phase 5)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ClausalChain:
+    """One multi-record clausal program.
+
+    On firmware ≥3.0.0 each clausal program occupies a contiguous run of
+    program slots: one head record (WHEN / AT / EVERY), zero or more
+    AND/OR condition records, then one or more THEN action records.
+
+    The engine groups the panel's program table into chains by walking
+    forward from each clausal head until the next head / non-clausal /
+    empty slot. The fields below carry the typed view of each role:
+
+    * ``head`` — the trigger record (WHEN: event-driven, AT: time-of-day,
+      EVERY: recurring interval)
+    * ``conditions`` — zero or more AND/OR records guarding the action
+    * ``actions`` — one or more THEN records firing when conditions pass
+    """
+
+    head: Program
+    conditions: tuple[Program, ...]
+    actions: tuple[Program, ...]
+
+
+def build_chains(
+    programs: tuple[Program, ...],
+) -> tuple[ClausalChain, ...]:
+    """Walk a slot-ordered Program tuple, gathering clausal chains.
+
+    Heads (WHEN/AT/EVERY) start a chain; subsequent AND/OR/THEN records
+    in adjacent slots join it. A chain ends when:
+      * the next slot is another head (start of next chain)
+      * the next slot is not a multi-record type (FREE, TIMED, etc.)
+      * the next slot is empty
+      * we run out of records
+
+    Returns chains in head-slot order. Chains with no THEN records are
+    dropped (they have no action to fire).
+    """
+    by_slot: dict[int, Program] = {
+        p.slot: p for p in programs if p.slot is not None and not p.is_empty()
+    }
+    if not by_slot:
+        return ()
+    heads = sorted(
+        (s for s, p in by_slot.items() if p.prog_type in (
+            int(ProgramType.WHEN),
+            int(ProgramType.AT),
+            int(ProgramType.EVERY),
+        )),
+    )
+    out: list[ClausalChain] = []
+    for head_slot in heads:
+        head = by_slot[head_slot]
+        conditions: list[Program] = []
+        actions: list[Program] = []
+        slot = head_slot + 1
+        while slot in by_slot:
+            rec = by_slot[slot]
+            ptype = rec.prog_type
+            if ptype in (
+                int(ProgramType.WHEN),
+                int(ProgramType.AT),
+                int(ProgramType.EVERY),
+            ):
+                break  # next chain's head
+            if ptype == int(ProgramType.AND) or ptype == int(ProgramType.OR):
+                conditions.append(rec)
+            elif ptype == int(ProgramType.THEN):
+                actions.append(rec)
+            else:
+                break  # ran into a non-clausal record (TIMED, REMARK, ...)
+            slot += 1
+        if actions:
+            out.append(ClausalChain(
+                head=head,
+                conditions=tuple(conditions),
+                actions=tuple(actions),
+            ))
+    return tuple(out)
+
+
+def evaluate_conditions(
+    conditions: tuple[Program, ...],
+    *,
+    is_satisfied,
+) -> bool:
+    """Evaluate an AND/OR condition list against an external predicate.
+
+    Phase 5 v1 keeps the evaluator deliberately simple: each AND/OR
+    record is reduced to a boolean by the caller-supplied
+    ``is_satisfied(condition_program)`` predicate, then combined with
+    standard short-circuit AND-of-OR-groups semantics:
+
+      * Records form left-to-right groups separated by OR boundaries
+        — each OR record *starts a new group*.
+      * Within a group, every AND record's predicate must be True
+        (logical AND).
+      * The overall result is True if *any* group's AND-result is True
+        (logical OR across groups).
+
+    An empty conditions tuple is unconditionally True — a "WHEN ...
+    THEN ..." chain with no AND/OR guard always runs its actions.
+
+    The detailed semantic decode of each AND/OR record (zone-state
+    checks, time-of-day comparisons, structured TEMP > 70-style ops)
+    is deferred to a follow-up; for now ``is_satisfied`` is the
+    integration point tests / HA code use to feed in evaluated values.
+    """
+    if not conditions:
+        return True
+    # Split into groups separated by OR records.
+    groups: list[list[Program]] = [[]]
+    for c in conditions:
+        if c.prog_type == int(ProgramType.OR):
+            groups.append([c])
+        else:
+            groups[-1].append(c)
+    # Any group whose ANDs all pass = overall pass.
+    for group in groups:
+        if all(is_satisfied(c) for c in group):
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
 
@@ -534,13 +663,38 @@ class ProgramEngine:
                 continue
         self._programs: tuple[Program, ...] = tuple(decoded)
         self._classified = classify(self._programs)
+        self._chains = build_chains(self._programs)
         self._tasks: list[asyncio.Task[None]] = []
         self._running = False
-        # event_id → list of EVENT programs that fire on it. Built lazily
-        # in start() so callers can mutate state.programs between init
-        # and start (e.g. a test seeding extra programs).
+        # event_id → list of EVENT programs *and* WHEN-headed clausal
+        # chains subscribed to it. Built lazily in start().
         self._event_table: dict[int, list[Program]] = {}
+        self._when_chain_table: dict[int, list[ClausalChain]] = {}
+        # External hook (defaults to "all conditions pass") for evaluating
+        # AND/OR records. Tests / HA replace this to model real state.
+        self._condition_evaluator = self._default_condition_evaluator
         self.metrics = _EngineMetrics()
+
+    @property
+    def chains(self) -> tuple[ClausalChain, ...]:
+        """All clausal chains decoded from the panel's program table."""
+        return self._chains
+
+    def set_condition_evaluator(self, fn) -> None:
+        """Replace the AND/OR condition evaluator.
+
+        ``fn`` is called with each AND/OR program record and must return
+        bool. The default returns True for every AND, False for every
+        OR (a degenerate evaluator that means "all chains' first AND
+        groups always pass" — useful as a smoke-test default, not for
+        real automation). Real callers supply a state-aware evaluator.
+        """
+        self._condition_evaluator = fn
+
+    @staticmethod
+    def _default_condition_evaluator(condition: Program) -> bool:
+        """Stub evaluator — caller should override via set_condition_evaluator."""
+        return condition.prog_type == int(ProgramType.AND)
 
     # ---- inspection -------------------------------------------------------
 
@@ -591,6 +745,30 @@ class ProgramEngine:
         self._event_table.clear()
         for program in self._classified.event:
             self._event_table.setdefault(program.event_id, []).append(program)
+        # Phase 5: clausal chains. AT and EVERY chains spawn worker
+        # tasks; WHEN chains register in a parallel event-dispatch table
+        # so emit_event() fires both raw EVENT programs and matching
+        # WHEN chains.
+        self._when_chain_table.clear()
+        for chain in self._chains:
+            if chain.head.prog_type == int(ProgramType.WHEN):
+                self._when_chain_table.setdefault(
+                    chain.head.event_id, []
+                ).append(chain)
+            elif chain.head.prog_type == int(ProgramType.AT):
+                self._tasks.append(
+                    asyncio.create_task(
+                        self._run_at_chain(chain),
+                        name=f"omni-pca-at-chain-{chain.head.slot}",
+                    )
+                )
+            elif chain.head.prog_type == int(ProgramType.EVERY):
+                self._tasks.append(
+                    asyncio.create_task(
+                        self._run_every_chain(chain),
+                        name=f"omni-pca-every-chain-{chain.head.slot}",
+                    )
+                )
 
     async def _run_timed_program(self, program: Program) -> None:
         """Sleep-until-next-fire loop for one TIMED program.
@@ -647,7 +825,12 @@ class ProgramEngine:
         programs = self._event_table.get(event_id, ())
         for program in programs:
             await self._fire(program)
-        return len(programs)
+        fired = len(programs)
+        # Plus any WHEN-headed clausal chains subscribed to this event.
+        for chain in self._when_chain_table.get(event_id, ()):
+            if await self._fire_chain(chain):
+                fired += 1
+        return fired
 
     async def emit_user_macro_button(self, button: int) -> int:
         """Convenience: fire EVENT programs subscribed to a button press."""
@@ -682,6 +865,82 @@ class ProgramEngine:
             _log.exception(
                 "engine: YEARLY slot %s crashed", program.slot,
             )
+            self.metrics.errors += 1
+
+    async def _fire_chain(self, chain: ClausalChain) -> bool:
+        """Evaluate a chain's AND/OR conditions; if they pass, fire every
+        THEN action. Returns True iff the conditions passed.
+
+        Each fired THEN action goes through the same wire-handler path
+        as TIMED/YEARLY/EVENT programs.
+        """
+        try:
+            passed = evaluate_conditions(
+                chain.conditions, is_satisfied=self._condition_evaluator,
+            )
+        except Exception:
+            _log.exception(
+                "engine: chain %s condition evaluation raised",
+                chain.head.slot,
+            )
+            self.metrics.errors += 1
+            return False
+        if not passed:
+            return False
+        for action in chain.actions:
+            await self._fire(action)
+        return True
+
+    async def _run_at_chain(self, chain: ClausalChain) -> None:
+        """Sleep-until-next-fire loop for an AT-headed chain.
+
+        AT records carry the same TIMED fields (hour/minute/days/
+        time_kind/time_offset) as compact-form TIMED programs, so we
+        reuse the same scheduling primitives.
+        """
+        try:
+            while self._running:
+                now = self._clock.now()
+                head = chain.head
+                if head.time_kind == TimeKind.ABSOLUTE:
+                    next_fire = _next_absolute_fire(now, head)
+                elif self._location is None:
+                    return
+                else:
+                    next_fire = _next_sun_relative_fire(now, head, self._location)
+                if next_fire is None:
+                    return
+                await self._clock.sleep_until(next_fire)
+                if not self._running:
+                    return
+                await self._fire_chain(chain)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("engine: AT chain slot %s crashed", chain.head.slot)
+            self.metrics.errors += 1
+
+    async def _run_every_chain(self, chain: ClausalChain) -> None:
+        """Sleep-until-next-fire loop for an EVERY-headed chain.
+
+        Interval is in seconds per :meth:`Program.every_interval`. Zero
+        disables the chain (matches real-panel behaviour for an
+        unconfigured EVERY record).
+        """
+        interval_sec = chain.head.every_interval
+        if interval_sec <= 0:
+            return
+        delay = timedelta(seconds=interval_sec)
+        try:
+            while self._running:
+                await self._clock.sleep_until(self._clock.now() + delay)
+                if not self._running:
+                    return
+                await self._fire_chain(chain)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("engine: EVERY chain slot %s crashed", chain.head.slot)
             self.metrics.errors += 1
 
     async def _fire(self, program: Program) -> None:

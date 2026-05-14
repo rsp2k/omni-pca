@@ -140,21 +140,22 @@ def _yearly(slot: int) -> Program:
     )
 
 
-def _when(slot: int) -> Program:
+def _bare_when(slot: int) -> Program:
     return Program(slot=slot, prog_type=int(ProgramType.WHEN), cond=0x0001)
 
 
-def _and(slot: int) -> Program:
+def _bare_and(slot: int) -> Program:
     return Program(slot=slot, prog_type=int(ProgramType.AND))
 
 
-def _then(slot: int) -> Program:
+def _bare_then(slot: int) -> Program:
     return Program(slot=slot, prog_type=int(ProgramType.THEN), cmd=3)
 
 
 def test_classify_buckets_each_type() -> None:
     bag = (
-        _free(), _timed(2), _event(3), _yearly(4), _when(5), _and(6), _then(7),
+        _free(), _timed(2), _event(3), _yearly(4),
+        _bare_when(5), _bare_and(6), _bare_then(7),
     )
     out = classify(bag)
     assert [p.slot for p in out.timed] == [2]
@@ -206,7 +207,7 @@ async def test_engine_constructs_against_empty_panel() -> None:
 
 @pytest.mark.asyncio
 async def test_engine_classifies_loaded_programs() -> None:
-    panel = _panel_with_programs(_timed(1), _event(2), _yearly(3), _when(4))
+    panel = _panel_with_programs(_timed(1), _event(2), _yearly(3), _bare_when(4))
     engine = ProgramEngine(panel, clock=FakeClock(
         datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
     ))
@@ -772,3 +773,247 @@ async def test_engine_fires_sun_relative_program_with_location() -> None:
         await asyncio.sleep(0)
         assert engine.metrics.timed_fired == 1
         assert panel.state.units[5].state == 1
+
+
+# ---- Phase 5: Clausal chains --------------------------------------------
+
+
+from omni_pca.program_engine import (  # noqa: E402
+    ClausalChain,
+    build_chains,
+    evaluate_conditions,
+)
+
+
+def _when(slot: int, event_id: int) -> Program:
+    return Program(
+        slot=slot, prog_type=int(ProgramType.WHEN),
+        month=(event_id >> 8) & 0xFF, day=event_id & 0xFF,
+    )
+
+
+def _at(slot: int, hour: int, minute: int, days: int) -> Program:
+    return Program(
+        slot=slot, prog_type=int(ProgramType.AT),
+        hour=hour, minute=minute, days=days,
+    )
+
+
+def _every(slot: int, interval_sec: int) -> Program:
+    # every_interval = ((cond & 0xFF) << 8) | ((cond2 >> 8) & 0xFF)
+    cond = (interval_sec >> 8) & 0xFF
+    cond2 = (interval_sec & 0xFF) << 8
+    return Program(
+        slot=slot, prog_type=int(ProgramType.EVERY),
+        cond=cond, cond2=cond2,
+    )
+
+
+def _and_cond(slot: int) -> Program:
+    return Program(slot=slot, prog_type=int(ProgramType.AND))
+
+
+def _or_cond(slot: int) -> Program:
+    return Program(slot=slot, prog_type=int(ProgramType.OR))
+
+
+def _then_action(slot: int, cmd: int, pr2: int) -> Program:
+    return Program(
+        slot=slot, prog_type=int(ProgramType.THEN),
+        cmd=cmd, pr2=pr2,
+    )
+
+
+def test_build_chains_simple_when_then() -> None:
+    """Minimal chain: WHEN at slot 1, THEN at slot 2."""
+    chains = build_chains((
+        _when(1, 0x0405),
+        _then_action(2, int(Command.UNIT_ON), 7),
+    ))
+    assert len(chains) == 1
+    assert chains[0].head.slot == 1
+    assert chains[0].conditions == ()
+    assert [a.slot for a in chains[0].actions] == [2]
+
+
+def test_build_chains_with_and_conditions_and_multiple_actions() -> None:
+    chains = build_chains((
+        _when(1, 0x0405),
+        _and_cond(2),
+        _and_cond(3),
+        _then_action(4, int(Command.UNIT_ON), 1),
+        _then_action(5, int(Command.UNIT_OFF), 2),
+    ))
+    assert len(chains) == 1
+    c = chains[0]
+    assert [x.slot for x in c.conditions] == [2, 3]
+    assert [a.slot for a in c.actions] == [4, 5]
+
+
+def test_build_chains_separates_adjacent_chains() -> None:
+    chains = build_chains((
+        _when(1, 0x0405),
+        _then_action(2, 1, 1),
+        _at(3, 6, 0, int(Days.MONDAY)),
+        _then_action(4, 1, 2),
+    ))
+    assert [c.head.slot for c in chains] == [1, 3]
+    assert chains[0].actions[0].slot == 2
+    assert chains[1].actions[0].slot == 4
+
+
+def test_build_chains_drops_chains_without_then() -> None:
+    """A WHEN with no THEN has nothing to fire — skip silently."""
+    chains = build_chains((
+        _when(1, 0x0405),
+        _and_cond(2),
+        # no THEN
+    ))
+    assert chains == ()
+
+
+def test_build_chains_stops_at_non_clausal_record() -> None:
+    """A TIMED record between chains ends the prior chain."""
+    timed = Program(
+        slot=3, prog_type=int(ProgramType.TIMED),
+        cmd=1, hour=6, minute=0, days=int(Days.MONDAY),
+    )
+    chains = build_chains((
+        _when(1, 0x0405),
+        _then_action(2, 1, 1),
+        timed,
+        _when(4, 0x0410),
+        _then_action(5, 1, 2),
+    ))
+    assert [c.head.slot for c in chains] == [1, 4]
+
+
+def test_evaluate_conditions_empty_is_true() -> None:
+    assert evaluate_conditions((), is_satisfied=lambda c: False) is True
+
+
+def test_evaluate_conditions_all_ands() -> None:
+    cs = (_and_cond(1), _and_cond(2))
+    assert evaluate_conditions(cs, is_satisfied=lambda c: True) is True
+    assert evaluate_conditions(cs, is_satisfied=lambda c: False) is False
+    # One fails → whole group fails.
+    assert evaluate_conditions(
+        cs, is_satisfied=lambda c: c.slot == 1,
+    ) is False
+
+
+def test_evaluate_conditions_or_group_separation() -> None:
+    """Two groups via OR: group A (AND only) fails, group B (OR + AND) passes."""
+    cs = (
+        _and_cond(1),  # group A start
+        _and_cond(2),
+        _or_cond(3),  # group B start (OR record itself)
+        _and_cond(4),
+    )
+    # Group A: slots 1, 2; Group B: slots 3, 4.
+    def is_sat(c):
+        return c.slot in (3, 4)  # group B fully passes
+    assert evaluate_conditions(cs, is_satisfied=is_sat) is True
+
+
+@pytest.mark.asyncio
+async def test_engine_classifies_clausal_heads() -> None:
+    """Engine exposes built chains via the chains property."""
+    panel = _panel_with_programs(
+        _when(1, 0x0405),
+        _then_action(2, int(Command.UNIT_ON), 7),
+    )
+    engine = ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    ))
+    assert len(engine.chains) == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_when_chain_fires_on_event() -> None:
+    """A WHEN-headed chain dispatches when emit_event() matches its event."""
+    button_evt = event_id_user_macro_button(7)
+    panel = _panel_with_programs(
+        _when(1, button_evt),
+        _then_action(2, int(Command.UNIT_ON), 9),
+    )
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        fired = await engine.emit_user_macro_button(7)
+        assert fired == 1
+        assert engine.metrics.clausal_fired == 1
+        assert panel.state.units[9].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_when_chain_blocked_by_failing_condition() -> None:
+    """Default condition evaluator passes ANDs but fails ORs. A chain
+    with one AND condition fires; a chain with an OR-only group doesn't."""
+    button_evt = event_id_user_macro_button(7)
+    panel = _panel_with_programs(
+        _when(1, button_evt),
+        _and_cond(2),
+        _then_action(3, int(Command.UNIT_ON), 9),
+    )
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        # Default evaluator: ANDs pass → chain runs.
+        fired = await engine.emit_user_macro_button(7)
+        assert fired == 1
+        assert panel.state.units[9].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_custom_evaluator_can_block_chain() -> None:
+    """Replace evaluator with always-False; chain doesn't fire."""
+    button_evt = event_id_user_macro_button(7)
+    panel = _panel_with_programs(
+        _when(1, button_evt),
+        _and_cond(2),
+        _then_action(3, int(Command.UNIT_ON), 9),
+    )
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        engine.set_condition_evaluator(lambda c: False)
+        fired = await engine.emit_user_macro_button(7)
+        # Returns 0 — the chain matched the event but failed conditions.
+        assert fired == 0
+        assert engine.metrics.clausal_fired == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_at_chain_fires_at_scheduled_time() -> None:
+    """AT-headed chain fires at hour:minute on matching days."""
+    t0 = datetime(2026, 5, 11, 5, 59, tzinfo=timezone.utc)  # Mon 05:59
+    panel = _panel_with_programs(
+        _at(1, hour=6, minute=0, days=int(Days.MONDAY)),
+        _then_action(2, int(Command.UNIT_ON), 7),
+    )
+    clock = FakeClock(t0)
+    async with ProgramEngine(panel, clock=clock) as engine:
+        await asyncio.sleep(0)
+        await clock.advance_to(t0 + timedelta(minutes=2))
+        await asyncio.sleep(0)
+        assert engine.metrics.clausal_fired == 1
+        assert panel.state.units[7].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_every_chain_fires_on_interval() -> None:
+    """EVERY chain fires every N seconds."""
+    t0 = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    panel = _panel_with_programs(
+        _every(1, interval_sec=60),
+        _then_action(2, int(Command.UNIT_ON), 7),
+    )
+    clock = FakeClock(t0)
+    async with ProgramEngine(panel, clock=clock) as engine:
+        await asyncio.sleep(0)
+        # Walk three intervals.
+        for tick in (1, 2, 3):
+            await clock.advance_to(t0 + timedelta(seconds=60 * tick + 1))
+            await asyncio.sleep(0)
+        assert engine.metrics.clausal_fired == 3
