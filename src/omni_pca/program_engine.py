@@ -48,7 +48,16 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from .programs import Days, Program, ProgramType, TimeKind
+from .programs import (
+    CondArgType,
+    CondOP,
+    Days,
+    MiscConditional,
+    Program,
+    ProgramCond,
+    ProgramType,
+    TimeKind,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -606,6 +615,357 @@ def evaluate_conditions(
 
 
 # --------------------------------------------------------------------------
+# State-aware AND/OR evaluator
+# --------------------------------------------------------------------------
+
+
+class _UnsupportedCondition(Exception):
+    """Raised internally when an AND/OR record encodes a check we don't
+    yet evaluate. The caller (StateEvaluator) treats this as False —
+    "we can't prove this condition", so the chain stays guarded — and
+    logs once so the next semantic-decode pass has a punch list.
+    """
+
+
+class StateEvaluator:
+    """Decode AND/OR records against a :class:`MockState` snapshot.
+
+    Each AND/OR :class:`Program` record encodes either:
+
+    * **Traditional** (``and_op == 0``): a compact bit-packed condition
+      in the ``cond`` u16 selecting a family (ProgramCond: ZONE / CTRL /
+      TIME / SEC / OTHER) with an inline operand. Decoded per
+      ``clsText.GetConditionalText`` (clsText.cs:2224-2274).
+
+    * **Structured** (``and_op > 0``): a ``Arg1 OP Arg2`` triple where
+      Arg1 and Arg2 are typed references (Zone / Unit / Thermostat /
+      TimeDate / Constant / …) plus per-type field selectors. The
+      operator is one of :class:`CondOP` (EQ / NE / LT / GT / …).
+
+    Coverage in this initial cut:
+
+    Traditional:
+      * ZONE family — zone secure / not-ready against MockZoneState
+      * CTRL family — unit on / off against MockUnitState
+      * SEC family — area in security-mode against MockAreaState
+      * OTHER family: ``NEVER`` (always false), ``LIGHT``/``DARK``
+        approximated via the engine's sun events when location is set,
+        ``AC_POWER_OFF``/``ON`` (no model — return False),
+        ``BATTERY_LOW``/``OK`` (no model — return False)
+      * TIME family (time-clock enabled/disabled) — no MockState
+        slot for time-clock toggles, returns False
+
+    Structured:
+      * Zone.CurrentState / ArmingState (== const)
+      * Unit.CurrentState / Level (== / >= / <= const)
+      * Thermostat.CurrentTemp / Humidity / setpoints (numeric compare)
+      * TimeDate.Month / Day / DayOfWeek / Hour / Minute (numeric compare)
+
+    Anything else returns ``False`` and logs at DEBUG once per
+    condition class — keeps a chain *guarded* rather than fired-too-
+    eagerly when we can't yet decode the predicate.
+
+    Time-related comparisons need a :class:`Clock`; pass one to honor
+    Hour/Minute/DayOfWeek predicates correctly. Without a clock those
+    return False.
+    """
+
+    def __init__(
+        self,
+        state,
+        *,
+        clock: Clock | None = None,
+        location: PanelLocation | None = None,
+    ) -> None:
+        self._state = state
+        self._clock = clock
+        self._location = location
+
+    def __call__(self, condition: Program) -> bool:
+        """Evaluate one AND/OR record against the bound MockState.
+
+        Treated as a plain predicate so callers can pass this instance
+        directly to ``ProgramEngine.set_condition_evaluator``.
+        """
+        try:
+            if condition.and_op == CondOP.ARG1_TRADITIONAL:
+                return self._eval_traditional(condition)
+            return self._eval_structured(condition)
+        except _UnsupportedCondition as err:
+            _log.debug("evaluator: unsupported condition: %s", err)
+            return False
+        except Exception:
+            _log.exception("evaluator: condition evaluation crashed")
+            return False
+
+    # ---- Traditional ------------------------------------------------------
+
+    def _eval_traditional(self, c: Program) -> bool:
+        """Decode a Traditional AND record.
+
+        Per ``clsConditionLine.Cond`` (clsConditionLine.cs:17-33), the
+        compact-form cond is split across two AND-record slots:
+
+        * disk byte 1 (= ``and_family``) carries the compact's high byte
+          (the family + selector encoding from GetConditionalText)
+        * disk bytes 3-4 (= ``and_arg1_ix``, ``and_instance`` derived
+          from ``cond2 >> 8``) carry the compact's low byte (the
+          object index, shifted into the high half)
+
+        Family decoding mirrors clsText.GetConditionalText (clsText.cs:
+        2224-2274):
+
+          family & 0xFC == 0x00 → OTHER  (low 4 bits = MiscConditional)
+          family & 0xFC == 0x04 → ZONE   (bit 0x02 = NOT_READY, else SECURE)
+          family & 0xFC == 0x08 → CTRL   (bit 0x02 = ON,         else OFF)
+          family & 0xFC == 0x0C → TIME   (bit 0x02 = ENABLED,    else DIS.)
+          family >= 0x10        → SEC    (high nibble = mode, low = area)
+        """
+        family = c.and_family
+        instance = c.and_instance
+        family_major = family & 0xFC
+        secondary = bool(family & 0x02)  # selector bit within the family
+        if family_major == 0x00:
+            return self._eval_other(family & 0x0F)
+        if family_major == ProgramCond.ZONE:
+            return self._eval_traditional_zone(instance, want_not_ready=secondary)
+        if family_major == ProgramCond.CTRL:
+            return self._eval_traditional_ctrl(instance, want_on=secondary)
+        if family_major == ProgramCond.TIME:
+            # Time-clock enabled / disabled — MockState doesn't model
+            # the enable bit, so we conservatively report disabled.
+            return False
+        # 0x10 and above: SEC family — high nibble = mode, low nibble = area.
+        return self._eval_traditional_sec(
+            area=family & 0x0F, mode=(family >> 4) & 0x07,
+        )
+
+    def _eval_traditional_zone(self, zone_num: int, *, want_not_ready: bool) -> bool:
+        """SECURE matches ``current_state == 0``; NOT_READY matches any
+        nonzero current_state (per the panel's display semantics)."""
+        zone = self._state.zones.get(zone_num)
+        if zone is None:
+            # Undefined zone reads as SECURE (matches real-panel behaviour
+            # when a programmed zone slot doesn't exist).
+            return not want_not_ready
+        if want_not_ready:
+            return zone.current_state != 0
+        return zone.current_state == 0
+
+    def _eval_traditional_ctrl(self, unit_num: int, *, want_on: bool) -> bool:
+        """ON matches any nonzero ``state``; OFF matches ``state == 0``.
+
+        MockUnitState.state encodes 0=off, 1=on, 100..200=dim level —
+        all nonzero values count as "on" for this predicate, which
+        matches the panel's binary on/off display.
+        """
+        unit = self._state.units.get(unit_num)
+        if unit is None:
+            return not want_on  # missing unit reads as OFF
+        on = unit.state != 0
+        return on == want_on
+
+    def _eval_traditional_sec(self, *, area: int, mode: int) -> bool:
+        """Area in security-mode N. ``area == 0`` means "any area in
+        this mode" per GetConditionalText:2262 — without a multi-area
+        model we approximate by checking area 1."""
+        if area == 0:
+            area = 1
+        a = self._state.areas.get(area)
+        if a is None:
+            return False
+        return a.mode == mode
+
+    def _eval_other(self, misc_code: int) -> bool:
+        """OTHER family: low 4 bits = enuMiscConditional."""
+        try:
+            cat = MiscConditional(misc_code)
+        except ValueError:
+            raise _UnsupportedCondition(f"unknown misc condition {misc_code}")
+        if cat == MiscConditional.NONE:
+            return True
+        if cat == MiscConditional.NEVER:
+            return False
+        if cat in (MiscConditional.LIGHT, MiscConditional.DARK):
+            light = self._is_light_outside()
+            if light is None:
+                # Can't determine — be conservative, don't fire either way.
+                return False
+            return light if cat == MiscConditional.LIGHT else not light
+        # PHONE_*, AC_POWER_*, BATTERY_*, ENERGY_COST_* — no MockState
+        # model for any of these yet. Conservatively False.
+        return False
+
+    def _is_light_outside(self) -> bool | None:
+        """Approximate "is the sun up" against the engine's PanelLocation
+        + clock. Returns None when clock or location is missing
+        (caller decides what to do with the indeterminate result)."""
+        if self._clock is None or self._location is None:
+            return None
+        try:
+            now = self._clock.now()
+            sunrise, sunset = _sun_events(self._location, now.date())
+        except Exception:
+            return None
+        return sunrise <= now <= sunset
+
+    # ---- Structured -------------------------------------------------------
+
+    def _eval_structured(self, c: Program) -> bool:
+        """Evaluate ``Arg1 OP Arg2`` style conditions.
+
+        Resolves Arg1 and Arg2 to numeric values via :meth:`_resolve_arg`
+        then compares with the operator. Comparison operators are
+        straightforward integer math; AND/OR/XOR at this layer are
+        treated as bitwise reductions on the resolved values (matches
+        the C# operator semantics for those uncommon op codes).
+        """
+        op = c.and_op
+        arg1 = self._resolve_arg(
+            c.and_arg1_argtype, c.and_arg1_ix, c.and_arg1_field,
+        )
+        arg2 = self._resolve_arg(
+            c.and_arg2_argtype, c.and_arg2_ix, c.and_arg2_field,
+        )
+        if arg1 is None or arg2 is None:
+            return False
+        if op == CondOP.ARG1_EQ_ARG2:
+            return arg1 == arg2
+        if op == CondOP.ARG1_NE_ARG2:
+            return arg1 != arg2
+        if op == CondOP.ARG1_LT_ARG2:
+            return arg1 < arg2
+        if op == CondOP.ARG1_GT_ARG2:
+            return arg1 > arg2
+        if op == CondOP.ARG1_ODD:
+            return (arg1 & 1) == 1
+        if op == CondOP.ARG1_EVEN:
+            return (arg1 & 1) == 0
+        # MULTIPLE / IN / NOT_IN are bitfield checks the panel uses for
+        # day-of-week and area-set tests. arg2 is the bitmask.
+        if op == CondOP.ARG1_MULTIPLE_ARG2:
+            return arg2 != 0 and (arg1 % arg2) == 0
+        if op == CondOP.ARG1_IN_ARG2:
+            return bool(arg1 & arg2)
+        if op == CondOP.ARG1_NOT_IN_ARG2:
+            return not bool(arg1 & arg2)
+        raise _UnsupportedCondition(f"unknown structured op {op}")
+
+    def _resolve_arg(
+        self, argtype: int, ix: int, field: int,
+    ) -> int | None:
+        """Return the numeric value of one Arg side, or None if it can't
+        be resolved (unknown type, missing object, missing clock).
+        """
+        if argtype == CondArgType.CONSTANT:
+            return ix
+        if argtype == CondArgType.ZONE:
+            return self._resolve_zone_field(ix, field)
+        if argtype == CondArgType.UNIT:
+            return self._resolve_unit_field(ix, field)
+        if argtype == CondArgType.THERMOSTAT:
+            return self._resolve_thermostat_field(ix, field)
+        if argtype == CondArgType.AREA:
+            return self._resolve_area_field(ix, field)
+        if argtype == CondArgType.TIME_DATE:
+            return self._resolve_timedate_field(field)
+        # USER_SETTING, AUXILLARY, AUDIO, ACCESS_CONTROL, MESSAGE,
+        # SYSTEM — no MockState models for these. Treat as unresolved
+        # so the comparison returns False.
+        raise _UnsupportedCondition(f"unsupported argtype {argtype}")
+
+    def _resolve_zone_field(self, ix: int, field: int) -> int | None:
+        zone = self._state.zones.get(ix)
+        if zone is None:
+            return None
+        # enuZoneField: LoopReading=1, CurrentState=2, ArmingState=3, AlarmState=4
+        if field == 1:
+            return zone.loop
+        if field == 2:
+            return zone.current_state
+        if field == 3:
+            return zone.arming_state
+        if field == 4:
+            return zone.latched_state
+        raise _UnsupportedCondition(f"zone field {field}")
+
+    def _resolve_unit_field(self, ix: int, field: int) -> int | None:
+        unit = self._state.units.get(ix)
+        if unit is None:
+            return None
+        # enuUnitField: CurrentState=1, PreviousState=2, Timer=3, Level=4
+        if field == 1:
+            # 0 = off, 1 = on, 100..200 = dim. The panel treats anything
+            # non-zero as "on" at this granularity.
+            return 1 if unit.state != 0 else 0
+        if field == 3:
+            return unit.time_remaining
+        if field == 4:
+            # Level: panel returns 0..100% — derive from state byte.
+            if unit.state >= 100:
+                return unit.state - 100
+            return 100 if unit.state == 1 else 0
+        raise _UnsupportedCondition(f"unit field {field}")
+
+    def _resolve_thermostat_field(self, ix: int, field: int) -> int | None:
+        t = self._state.thermostats.get(ix)
+        if t is None:
+            return None
+        # enuThermostatField map (subset MockState has data for):
+        # CurrentTemp=1, HeatSetpt=2, CoolSetpt=3, SystemMode=4, FanMode=5,
+        # HoldMode=6, Humidity=9, HumidifySetpoint=10, DehumidifySetpoint=11,
+        # OutdoorTemperature=12
+        return {
+            1: t.temperature_raw,
+            2: t.heat_setpoint_raw,
+            3: t.cool_setpoint_raw,
+            4: t.system_mode,
+            5: t.fan_mode,
+            6: t.hold_mode,
+            9: t.humidity_raw,
+            10: t.humidify_setpoint_raw,
+            11: t.dehumidify_setpoint_raw,
+            12: t.outdoor_temperature_raw,
+        }.get(field, None)
+
+    def _resolve_area_field(self, ix: int, field: int) -> int | None:
+        area = self._state.areas.get(ix)
+        if area is None:
+            return None
+        # No enuAreaField source — be permissive: field 1 = mode.
+        if field == 1:
+            return area.mode
+        raise _UnsupportedCondition(f"area field {field}")
+
+    def _resolve_timedate_field(self, field: int) -> int | None:
+        if self._clock is None:
+            return None
+        now = self._clock.now()
+        # enuTimeDateField: Date=1, Year=2, Month=3, Day=4, DayOfWeek=5,
+        # Time=6, DST_Flag=7, Hour=8, Minute=9, SunriseSunset=10.
+        if field == 2:
+            return now.year
+        if field == 3:
+            return now.month
+        if field == 4:
+            return now.day
+        if field == 5:
+            # DayOfWeek: panel uses 1=Mon..7=Sun per clsHAC. Python
+            # weekday() returns Mon=0..Sun=6 — add 1.
+            return now.weekday() + 1
+        if field == 6:
+            # Time-of-day encoded as (hour * 60 + minute) — minutes since
+            # midnight. Matches the C# packing in GetComplexConditionText.
+            return now.hour * 60 + now.minute
+        if field == 8:
+            return now.hour
+        if field == 9:
+            return now.minute
+        # Date / DST_Flag / SunriseSunset — not modelled here.
+        raise _UnsupportedCondition(f"timedate field {field}")
+
+
+# --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
 
@@ -687,9 +1047,26 @@ class ProgramEngine:
         bool. The default returns True for every AND, False for every
         OR (a degenerate evaluator that means "all chains' first AND
         groups always pass" — useful as a smoke-test default, not for
-        real automation). Real callers supply a state-aware evaluator.
+        real automation).
+
+        For real automation, call :meth:`use_state_evaluator` instead
+        (or build your own :class:`StateEvaluator` and pass it here).
         """
         self._condition_evaluator = fn
+
+    def use_state_evaluator(self) -> "StateEvaluator":
+        """Install a :class:`StateEvaluator` bound to this engine's
+        ``MockState``, clock, and location. Returns the new evaluator
+        so the caller can introspect it.
+
+        Equivalent to ``engine.set_condition_evaluator(
+        StateEvaluator(panel.state, clock=clock, location=loc))``.
+        """
+        evaluator = StateEvaluator(
+            self._panel.state, clock=self._clock, location=self._location,
+        )
+        self._condition_evaluator = evaluator
+        return evaluator
 
     @staticmethod
     def _default_condition_evaluator(condition: Program) -> bool:

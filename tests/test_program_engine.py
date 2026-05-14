@@ -19,7 +19,13 @@ from omni_pca.program_engine import (
     RealClock,
     classify,
 )
-from omni_pca.programs import Days, Program, ProgramType
+from omni_pca.programs import (
+    CondArgType,
+    CondOP,
+    Days,
+    Program,
+    ProgramType,
+)
 
 CONTROLLER_KEY = bytes(range(16))
 
@@ -1017,3 +1023,332 @@ async def test_engine_every_chain_fires_on_interval() -> None:
             await clock.advance_to(t0 + timedelta(seconds=60 * tick + 1))
             await asyncio.sleep(0)
         assert engine.metrics.clausal_fired == 3
+
+
+# ---- Phase 6: detailed AND/OR semantics (StateEvaluator) ----------------
+
+
+from omni_pca.mock_panel import (  # noqa: E402
+    MockAreaState,
+    MockThermostatState,
+    MockUnitState,
+    MockZoneState,
+)
+from omni_pca.program_engine import StateEvaluator  # noqa: E402
+
+
+def _and_traditional(
+    slot: int, family: int, instance: int = 0,
+) -> Program:
+    """Build a Traditional (OP=0) AND record.
+
+    Per clsConditionLine.Cond synthesis (clsConditionLine.cs:17-33),
+    the family byte lives in disk byte 1 = ``and_family`` (Python's
+    ``cond & 0xFF``), and the object instance lives in disk byte 3
+    = ``and_instance`` (Python's ``(cond2 >> 8) & 0xFF``).
+    """
+    return Program(
+        slot=slot, prog_type=int(ProgramType.AND),
+        cond=family & 0xFF,             # byte 1 = family; byte 2 (OP) = 0
+        cond2=(instance & 0xFF) << 8,   # byte 3 = instance; byte 4 = 0
+    )
+
+
+def _and_structured(
+    slot: int,
+    op: int,
+    arg1_type: int, arg1_ix: int, arg1_field: int,
+    arg2_type: int, arg2_ix: int, arg2_field: int = 0,
+) -> Program:
+    """Build a Structured (OP>0) AND record.
+
+    Field layout per programs.py decoders:
+      cond high byte (>>8 & 0xFF) = op (and_op)
+      cond low byte (& 0xFF) = arg1_argtype (and_arg1_argtype)
+      cond2 = arg1_ix (and_arg1_ix)
+      cmd = arg1_field (and_arg1_field)
+      par = arg2_argtype (and_arg2_argtype)
+      pr2 = arg2_ix (and_arg2_ix)
+      month = arg2_field (and_arg2_field)
+    """
+    return Program(
+        slot=slot, prog_type=int(ProgramType.AND),
+        cond=(op << 8) | arg1_type,
+        cond2=arg1_ix,
+        cmd=arg1_field,
+        par=arg2_type,
+        pr2=arg2_ix,
+        month=arg2_field,
+    )
+
+
+def _state_with(**kwargs) -> MockState:
+    return MockState(**kwargs)
+
+
+# ---- Traditional ZONE family -------------------------------------------
+
+
+def test_state_evaluator_zone_secure_passes_when_state_zero() -> None:
+    state = _state_with(zones={
+        7: MockZoneState(name="FRONT DOOR", current_state=0),
+    })
+    ev = StateEvaluator(state)
+    # ZONE family = 0x04 (secure variant); instance = 7
+    cond = _and_traditional(1, family=0x04, instance=7)
+    assert ev(cond) is True
+
+
+def test_state_evaluator_zone_secure_fails_when_tripped() -> None:
+    state = _state_with(zones={
+        7: MockZoneState(name="FRONT DOOR", current_state=1),  # not-ready
+    })
+    ev = StateEvaluator(state)
+    cond = _and_traditional(1, family=0x04, instance=7)
+    assert ev(cond) is False
+
+
+def test_state_evaluator_zone_not_ready_passes_when_tripped() -> None:
+    state = _state_with(zones={
+        7: MockZoneState(name="FRONT DOOR", current_state=1),
+    })
+    ev = StateEvaluator(state)
+    # family 0x06 = ZONE + NOT_READY selector bit
+    cond = _and_traditional(1, family=0x06, instance=7)
+    assert ev(cond) is True
+
+
+def test_state_evaluator_zone_undefined_is_secure() -> None:
+    """Undefined zone reads as SECURE — matches real-panel behaviour
+    when a programmed zone slot doesn't exist."""
+    ev = StateEvaluator(_state_with())  # no zones
+    secure_check = _and_traditional(1, family=0x04, instance=99)
+    not_ready_check = _and_traditional(2, family=0x06, instance=99)
+    assert ev(secure_check) is True
+    assert ev(not_ready_check) is False
+
+
+# ---- Traditional CTRL family --------------------------------------------
+
+
+def test_state_evaluator_unit_on_passes_when_state_one() -> None:
+    state = _state_with(units={5: MockUnitState(name="LAMP", state=1)})
+    ev = StateEvaluator(state)
+    # CTRL family + ON selector = 0x0A
+    cond = _and_traditional(1, family=0x0A, instance=5)
+    assert ev(cond) is True
+
+
+def test_state_evaluator_unit_off_passes_when_state_zero() -> None:
+    state = _state_with(units={5: MockUnitState(name="LAMP", state=0)})
+    ev = StateEvaluator(state)
+    # CTRL family + OFF selector = 0x08
+    cond = _and_traditional(1, family=0x08, instance=5)
+    assert ev(cond) is True
+
+
+def test_state_evaluator_unit_on_for_dimmed_unit() -> None:
+    """Dim level 50% → state=150; ON predicate should pass."""
+    state = _state_with(units={5: MockUnitState(state=150)})
+    ev = StateEvaluator(state)
+    cond = _and_traditional(1, family=0x0A, instance=5)
+    assert ev(cond) is True
+
+
+# ---- Traditional SEC family ---------------------------------------------
+
+
+def test_state_evaluator_security_mode_match() -> None:
+    """SEC family: family byte = (mode << 4) | area. Area 1 in mode 2."""
+    state = _state_with(areas={1: MockAreaState(name="MAIN", mode=2)})
+    ev = StateEvaluator(state)
+    cond = _and_traditional(1, family=(2 << 4) | 1)  # mode 2, area 1 = 0x21
+    assert ev(cond) is True
+    # Area in different mode → fails.
+    cond_wrong = _and_traditional(1, family=(3 << 4) | 1)  # mode 3
+    assert ev(cond_wrong) is False
+
+
+# ---- Traditional OTHER family -------------------------------------------
+
+
+def test_state_evaluator_never_is_always_false() -> None:
+    """MiscConditional.NEVER (= 1) → always False, regardless of state."""
+    ev = StateEvaluator(_state_with())
+    # OTHER family + NEVER misc = 0x01
+    cond = _and_traditional(1, family=0x01)
+    assert ev(cond) is False
+
+
+def test_state_evaluator_dark_without_location_is_false() -> None:
+    ev = StateEvaluator(_state_with())  # no location
+    # OTHER family + DARK misc = 0x03
+    cond = _and_traditional(1, family=0x03)
+    assert ev(cond) is False
+
+
+# ---- Structured: Zone fields --------------------------------------------
+
+
+def test_state_evaluator_structured_zone_current_state_eq() -> None:
+    """Zone 5 CurrentState == 1 (not-ready) — structured form."""
+    state = _state_with(zones={5: MockZoneState(current_state=1)})
+    ev = StateEvaluator(state)
+    # EQ, Arg1=ZONE.CurrentState(2), Arg1IX=5, Arg2=CONSTANT, Arg2IX=1
+    cond = _and_structured(
+        slot=1, op=int(CondOP.ARG1_EQ_ARG2),
+        arg1_type=int(CondArgType.ZONE), arg1_ix=5, arg1_field=2,
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=1,
+    )
+    assert ev(cond) is True
+
+
+def test_state_evaluator_structured_zone_state_ne() -> None:
+    state = _state_with(zones={5: MockZoneState(current_state=0)})
+    ev = StateEvaluator(state)
+    cond = _and_structured(
+        slot=1, op=int(CondOP.ARG1_NE_ARG2),
+        arg1_type=int(CondArgType.ZONE), arg1_ix=5, arg1_field=2,
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=0,
+    )
+    assert ev(cond) is False  # state IS 0
+
+
+# ---- Structured: Thermostat fields --------------------------------------
+
+
+def test_state_evaluator_structured_thermostat_temp_gt() -> None:
+    """TEMPERATURE > 75 — structured comparison."""
+    # Thermostat raw temperature 168 ~ 76°F on the Omni linear scale,
+    # but we compare raw bytes here. Use a raw temp clearly above the
+    # constant.
+    state = _state_with(thermostats={
+        1: MockThermostatState(temperature_raw=80),
+    })
+    ev = StateEvaluator(state)
+    cond = _and_structured(
+        slot=1, op=int(CondOP.ARG1_GT_ARG2),
+        arg1_type=int(CondArgType.THERMOSTAT), arg1_ix=1, arg1_field=1,
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=75,
+    )
+    assert ev(cond) is True
+    # And < should fail.
+    cond_lt = _and_structured(
+        slot=2, op=int(CondOP.ARG1_LT_ARG2),
+        arg1_type=int(CondArgType.THERMOSTAT), arg1_ix=1, arg1_field=1,
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=75,
+    )
+    assert ev(cond_lt) is False
+
+
+# ---- Structured: TimeDate fields ----------------------------------------
+
+
+def test_state_evaluator_structured_timedate_hour_compare() -> None:
+    """Current hour == 22 — uses the clock."""
+    clock = FakeClock(datetime(2026, 5, 14, 22, 30, tzinfo=timezone.utc))
+    ev = StateEvaluator(_state_with(), clock=clock)
+    cond = _and_structured(
+        slot=1, op=int(CondOP.ARG1_EQ_ARG2),
+        arg1_type=int(CondArgType.TIME_DATE), arg1_ix=0, arg1_field=8,  # Hour
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=22,
+    )
+    assert ev(cond) is True
+
+
+def test_state_evaluator_structured_timedate_dayofweek() -> None:
+    """DayOfWeek == 4 (Thursday)."""
+    clock = FakeClock(datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc))  # Thu
+    ev = StateEvaluator(_state_with(), clock=clock)
+    cond = _and_structured(
+        slot=1, op=int(CondOP.ARG1_EQ_ARG2),
+        arg1_type=int(CondArgType.TIME_DATE), arg1_ix=0, arg1_field=5,  # DOW
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=4,
+    )
+    assert ev(cond) is True
+
+
+def test_state_evaluator_structured_timedate_without_clock_is_false() -> None:
+    """No clock → TimeDate predicates resolve to None → comparison False."""
+    ev = StateEvaluator(_state_with())  # no clock
+    cond = _and_structured(
+        slot=1, op=int(CondOP.ARG1_EQ_ARG2),
+        arg1_type=int(CondArgType.TIME_DATE), arg1_ix=0, arg1_field=8,
+        arg2_type=int(CondArgType.CONSTANT), arg2_ix=22,
+    )
+    assert ev(cond) is False
+
+
+# ---- Engine integration --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_engine_use_state_evaluator_gates_real_conditions() -> None:
+    """End-to-end: WHEN + AND IF UNIT 3 ON + THEN UNIT 9 ON.
+    Chain fires only when unit 3 is on at the time the event arrives."""
+    button_evt = event_id_user_macro_button(5)
+    # WHEN button 5; AND IF unit 3 ON; THEN unit 9 ON.
+    when = _when(1, button_evt)
+    and_cond = _and_traditional(2, family=0x0A, instance=3)  # CTRL + ON, unit 3
+    then = _then_action(3, int(Command.UNIT_ON), 9)
+
+    # Start with unit 3 OFF.
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(
+            programs={
+                1: when.encode_wire_bytes(),
+                2: and_cond.encode_wire_bytes(),
+                3: then.encode_wire_bytes(),
+            },
+            units={3: MockUnitState(state=0)},
+        ),
+    )
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        engine.use_state_evaluator()
+        # Unit 3 is OFF — chain blocked.
+        fired = await engine.emit_user_macro_button(5)
+        assert fired == 0
+        assert 9 not in panel.state.units or panel.state.units[9].state == 0
+
+        # Turn unit 3 ON, re-emit — chain fires.
+        panel.state.units[3].state = 1
+        fired = await engine.emit_user_macro_button(5)
+        assert fired == 1
+        assert panel.state.units[9].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_state_evaluator_or_alternative() -> None:
+    """WHEN + AND IF zone 5 secure + OR + AND IF zone 6 secure + THEN.
+    Fires if either zone is secure."""
+    button_evt = event_id_user_macro_button(5)
+    when = _when(1, button_evt)
+    and_z5 = _and_traditional(2, family=0x04, instance=5)   # ZONE 5 secure
+    or_break = _or_cond(3)                                  # OR boundary
+    and_z6 = _and_traditional(4, family=0x04, instance=6)   # ZONE 6 secure
+    then = _then_action(5, int(Command.UNIT_ON), 10)
+
+    # Zone 5 tripped, Zone 6 secure → group A fails, group B passes.
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(
+            programs={
+                p.slot: p.encode_wire_bytes()
+                for p in (when, and_z5, or_break, and_z6, then)
+            },
+            zones={
+                5: MockZoneState(current_state=1),
+                6: MockZoneState(current_state=0),
+            },
+        ),
+    )
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        engine.use_state_evaluator()
+        fired = await engine.emit_user_macro_button(5)
+        assert fired == 1  # OR-alternative passed
+        assert panel.state.units[10].state == 1
