@@ -211,6 +211,78 @@ def classify(programs: tuple[Program, ...]) -> _ClassifiedPrograms:
 
 
 # --------------------------------------------------------------------------
+# Geo / sun events
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PanelLocation:
+    """Geographic position for sunrise/sunset computation.
+
+    A thin wrapper that decouples the engine from a hard dependency on
+    :mod:`astral`. Build one from a decoded ``.pca`` like::
+
+        from omni_pca.pca_file import parse_pca_file
+        acct = parse_pca_file(data, key=KEY_EXPORT)
+        loc = PanelLocation.from_account(acct)
+
+    The engine accepts ``location=None`` (the default); in that mode
+    sunrise/sunset-relative TIMED programs simply don't fire — equivalent
+    to an empty Days mask.
+    """
+
+    name: str = "Panel"
+    region: str = "US"
+    timezone: str = "UTC"
+    latitude: float = 0.0
+    longitude: float = 0.0
+
+    @classmethod
+    def from_account(cls, account, *, name: str = "Panel") -> "PanelLocation":
+        """Build a PanelLocation from a :class:`omni_pca.pca_file.PcaAccount`.
+
+        ``acct.latitude``/``longitude`` are raw degrees; ``acct.time_zone``
+        is hours west of UTC, which we convert to an IANA-style
+        ``"Etc/GMT+N"`` zone — pyttz / astral resolve that correctly.
+        (The Etc/GMT signs are inverted relative to common usage by the
+        POSIX convention, hence "+N" for west-of-UTC.)
+        """
+        tz_off = getattr(account, "time_zone", 0)
+        # Etc/GMT+0 normalises to UTC for the zero case.
+        tz_name = f"Etc/GMT+{tz_off}" if tz_off else "UTC"
+        # Longitude on Omni is stored as positive degrees west; astral
+        # expects signed degrees east-of-prime. Negate.
+        return cls(
+            name=name,
+            region="US",  # not stored in .pca; "US" is fine as a label
+            timezone=tz_name,
+            latitude=float(getattr(account, "latitude", 0)),
+            longitude=-float(getattr(account, "longitude", 0)),
+        )
+
+
+def _sun_events(location: PanelLocation, day: date) -> tuple[datetime, datetime]:
+    """Return (sunrise, sunset) on ``day`` as timezone-aware UTC datetimes.
+
+    Raises :class:`ImportError` if the optional ``astral`` dependency
+    isn't installed; callers should catch and treat as "no sun events
+    available" (equivalent to skipping the program for that day).
+    """
+    from astral import LocationInfo
+    from astral.sun import sun
+
+    info = LocationInfo(
+        name=location.name,
+        region=location.region,
+        timezone=location.timezone,
+        latitude=location.latitude,
+        longitude=location.longitude,
+    )
+    times = sun(info.observer, date=day)
+    return times["sunrise"], times["sunset"]
+
+
+# --------------------------------------------------------------------------
 # TIMED scheduling
 # --------------------------------------------------------------------------
 
@@ -262,6 +334,69 @@ def _next_absolute_fire(now: datetime, program: Program) -> datetime | None:
         if _matches_days_mask(candidate.date(), program.days):
             return candidate
     return None  # safety net — shouldn't happen if mask is non-zero
+
+
+def _next_sun_relative_fire(
+    now: datetime,
+    program: Program,
+    location: PanelLocation,
+) -> datetime | None:
+    """Compute next fire for a sunrise/sunset-relative TIMED program.
+
+    For each candidate day (today through +8 days) we compute the
+    panel's sunrise/sunset, apply the program's signed minute offset
+    (``time_offset_minutes``), and return the first result strictly
+    after ``now`` whose date matches the program's Days mask.
+
+    Returns ``None`` if Days mask is empty, the program isn't sun-relative,
+    or the astral computation raises.
+    """
+    if program.time_kind not in (TimeKind.SUNRISE, TimeKind.SUNSET):
+        return None
+    if program.days == 0:
+        return None
+    offset = timedelta(minutes=program.time_offset_minutes)
+    is_sunrise = program.time_kind == TimeKind.SUNRISE
+    for delta_days in range(0, 8):
+        day = (now + timedelta(days=delta_days)).date()
+        if not _matches_days_mask(day, program.days):
+            continue
+        try:
+            sunrise, sunset = _sun_events(location, day)
+        except Exception:
+            _log.debug(
+                "sun computation failed for %s — skipping day", day, exc_info=True
+            )
+            return None
+        candidate = (sunrise if is_sunrise else sunset) + offset
+        if candidate > now:
+            return candidate
+    return None
+
+
+def _next_yearly_fire(now: datetime, program: Program) -> datetime | None:
+    """Compute the next datetime a YEARLY program should fire.
+
+    YEARLY programs match a fixed month/day at hour:minute, regardless
+    of weekday. Returns ``None`` if month is 0 (program disabled) or
+    the month/day combination is invalid (e.g. Feb 30).
+    """
+    if program.month == 0 or program.day == 0:
+        return None
+    candidate_year = now.year
+    for _ in range(2):  # try this year then next
+        try:
+            candidate = datetime(
+                candidate_year, program.month, program.day,
+                program.hour, program.minute,
+                tzinfo=now.tzinfo,
+            )
+        except ValueError:
+            return None  # Feb 30 etc.
+        if candidate > now:
+            return candidate
+        candidate_year += 1
+    return None  # safety net
 
 
 def _command_payload(program: Program) -> bytes:
@@ -318,9 +453,16 @@ class ProgramEngine:
     explicit start.
     """
 
-    def __init__(self, panel: "MockPanel", *, clock: Clock | None = None) -> None:
+    def __init__(
+        self,
+        panel: "MockPanel",
+        *,
+        clock: Clock | None = None,
+        location: PanelLocation | None = None,
+    ) -> None:
         self._panel = panel
         self._clock = clock or RealClock()
+        self._location = location
         # Decode raw bytes from MockState.programs into Program objects
         # once, at construction. Reclassifying on every start would be
         # wasteful and would also lose the slot indices.
@@ -373,19 +515,39 @@ class ProgramEngine:
                     name=f"omni-pca-timed-slot-{program.slot}",
                 )
             )
+        # Phase 3: one worker per YEARLY program.
+        for program in self._classified.yearly:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._run_yearly_program(program),
+                    name=f"omni-pca-yearly-slot-{program.slot}",
+                )
+            )
 
     async def _run_timed_program(self, program: Program) -> None:
         """Sleep-until-next-fire loop for one TIMED program.
 
-        Wakes at the program's scheduled hour:minute on the next
-        matching weekday, fires the command, then loops to the next
-        occurrence. Returns when the engine stops (task cancellation).
+        Handles both ABSOLUTE (wall-clock hour:minute) and sunrise /
+        sunset-relative time kinds. Sun-relative programs only run if
+        the engine was given a :class:`PanelLocation`; without one they
+        return immediately, the same way an empty Days mask would.
         """
         try:
             while self._running:
-                next_fire = _next_absolute_fire(self._clock.now(), program)
+                now = self._clock.now()
+                if program.time_kind == TimeKind.ABSOLUTE:
+                    next_fire = _next_absolute_fire(now, program)
+                elif self._location is None:
+                    _log.debug(
+                        "engine: TIMED slot %s is sun-relative but no "
+                        "location was supplied — skipping",
+                        program.slot,
+                    )
+                    return
+                else:
+                    next_fire = _next_sun_relative_fire(now, program, self._location)
                 if next_fire is None:
-                    return  # no valid Days mask — give up on this program
+                    return  # disabled (empty Days, sun unavailable, etc.)
                 await self._clock.sleep_until(next_fire)
                 if not self._running:
                     return
@@ -395,6 +557,25 @@ class ProgramEngine:
         except Exception:
             _log.exception(
                 "engine: TIMED slot %s crashed", program.slot,
+            )
+            self.metrics.errors += 1
+
+    async def _run_yearly_program(self, program: Program) -> None:
+        """Sleep-until-next-fire loop for one YEARLY program."""
+        try:
+            while self._running:
+                next_fire = _next_yearly_fire(self._clock.now(), program)
+                if next_fire is None:
+                    return  # disabled or invalid month/day
+                await self._clock.sleep_until(next_fire)
+                if not self._running:
+                    return
+                await self._fire(program)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception(
+                "engine: YEARLY slot %s crashed", program.slot,
             )
             self.metrics.errors += 1
 

@@ -412,3 +412,217 @@ async def test_engine_skips_empty_days_mask() -> None:
         await clock.advance_to(t0 + timedelta(days=7))
         await asyncio.sleep(0)
         assert engine.metrics.timed_fired == 0
+
+
+# ---- Phase 3: YEARLY + sunrise/sunset -----------------------------------
+
+
+from omni_pca.program_engine import (  # noqa: E402
+    PanelLocation,
+    _next_sun_relative_fire,
+    _next_yearly_fire,
+)
+
+
+def test_panel_location_from_account_negates_longitude() -> None:
+    """The Omni stores longitude as positive degrees west; PanelLocation
+    flips the sign to match astral's east-positive convention."""
+
+    class _AcctStub:
+        latitude = 44
+        longitude = 117
+        time_zone = 7
+
+    loc = PanelLocation.from_account(_AcctStub())
+    assert loc.latitude == 44.0
+    assert loc.longitude == -117.0  # flipped from +117 west → -117 east
+    assert loc.timezone == "Etc/GMT+7"
+
+
+def test_next_yearly_fire_picks_today() -> None:
+    # 2026-05-14 12:00; program 05/14 13:00 → today 13:00.
+    p = Program(
+        slot=1, prog_type=int(ProgramType.YEARLY),
+        cmd=1, month=5, day=14, hour=13, minute=0,
+    )
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    nxt = _next_yearly_fire(now, p)
+    assert nxt == datetime(2026, 5, 14, 13, 0, tzinfo=timezone.utc)
+
+
+def test_next_yearly_fire_rolls_over_to_next_year() -> None:
+    # 2026-12-31 23:00; program 01/01 00:00 → next year.
+    p = Program(
+        slot=1, prog_type=int(ProgramType.YEARLY),
+        cmd=1, month=1, day=1, hour=0, minute=0,
+    )
+    now = datetime(2026, 12, 31, 23, 0, tzinfo=timezone.utc)
+    nxt = _next_yearly_fire(now, p)
+    assert nxt == datetime(2027, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_next_yearly_fire_zero_month_returns_none() -> None:
+    p = Program(
+        slot=1, prog_type=int(ProgramType.YEARLY),
+        cmd=1, month=0, day=0, hour=0, minute=0,
+    )
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    assert _next_yearly_fire(now, p) is None
+
+
+def test_next_yearly_fire_invalid_date_returns_none() -> None:
+    """Feb 30 is invalid — program never fires."""
+    p = Program(
+        slot=1, prog_type=int(ProgramType.YEARLY),
+        cmd=1, month=2, day=30, hour=12, minute=0,
+    )
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    assert _next_yearly_fire(now, p) is None
+
+
+@pytest.mark.asyncio
+async def test_engine_fires_yearly_program() -> None:
+    """YEARLY May-14 12:00 program fires when clock crosses that date."""
+    t0 = datetime(2026, 5, 14, 11, 59, tzinfo=timezone.utc)
+    p = Program(
+        slot=10, prog_type=int(ProgramType.YEARLY),
+        cmd=int(Command.UNIT_ON), pr2=3,
+        month=5, day=14, hour=12, minute=0,
+    )
+    panel = _panel_with_programs(p)
+    clock = FakeClock(t0)
+    async with ProgramEngine(panel, clock=clock) as engine:
+        await asyncio.sleep(0)
+        await clock.advance_to(datetime(2026, 5, 14, 12, 1, tzinfo=timezone.utc))
+        await asyncio.sleep(0)
+        assert engine.metrics.yearly_fired == 1
+        assert panel.state.units[3].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_yearly_loops_next_year() -> None:
+    """After firing, YEARLY workers re-arm for the next year."""
+    t0 = datetime(2026, 5, 14, 11, 59, tzinfo=timezone.utc)
+    p = Program(
+        slot=10, prog_type=int(ProgramType.YEARLY),
+        cmd=int(Command.UNIT_ON), pr2=3,
+        month=5, day=14, hour=12, minute=0,
+    )
+    panel = _panel_with_programs(p)
+    clock = FakeClock(t0)
+    async with ProgramEngine(panel, clock=clock) as engine:
+        await asyncio.sleep(0)
+        # First fire.
+        await clock.advance_to(datetime(2026, 5, 14, 12, 1, tzinfo=timezone.utc))
+        await asyncio.sleep(0)
+        # Second fire next year.
+        await clock.advance_to(datetime(2027, 5, 14, 12, 1, tzinfo=timezone.utc))
+        await asyncio.sleep(0)
+        assert engine.metrics.yearly_fired == 2
+
+
+def test_next_sun_relative_fire_at_sunset() -> None:
+    """A TIMED program scheduled "at sunset" on a Thursday fires at
+    the astral-computed sunset for that day."""
+    p = Program(
+        slot=1, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=5,
+        hour=26, minute=0,  # AT_SUNSET sentinel
+        days=int(Days.THURSDAY),
+    )
+    loc = PanelLocation(
+        name="Boise", region="US", timezone="UTC",
+        latitude=43.6, longitude=-116.2,
+    )
+    # 2026-05-14 is a Thursday.
+    now = datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    nxt = _next_sun_relative_fire(now, p, loc)
+    assert nxt is not None
+    # Sunset in Boise mid-May is roughly 03:00 UTC the *next* day (late
+    # evening Mountain Time). Just verify it's in the right ballpark
+    # and after `now`.
+    assert nxt > now
+    assert nxt < now + timedelta(days=2)
+
+
+def test_next_sun_relative_fire_with_offset_before_sunrise() -> None:
+    """A "30 min before sunrise" program lands earlier than astral's
+    raw sunrise time by exactly 30 minutes."""
+    p_at = Program(
+        slot=1, prog_type=int(ProgramType.TIMED),
+        cmd=1, hour=25, minute=0,  # AT_SUNRISE
+        days=int(Days.THURSDAY),
+    )
+    p_before = Program(
+        slot=2, prog_type=int(ProgramType.TIMED),
+        cmd=1, hour=25, minute=256 - 30,  # 30 min before (sbyte -30)
+        days=int(Days.THURSDAY),
+    )
+    loc = PanelLocation(
+        name="Boise", region="US", timezone="UTC",
+        latitude=43.6, longitude=-116.2,
+    )
+    now = datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    at = _next_sun_relative_fire(now, p_at, loc)
+    before = _next_sun_relative_fire(now, p_before, loc)
+    assert at is not None and before is not None
+    # The "before" fire is 30 minutes earlier than the "at" fire.
+    assert at - before == timedelta(minutes=30)
+
+
+def test_next_sun_relative_fire_empty_days_returns_none() -> None:
+    p = Program(
+        slot=1, prog_type=int(ProgramType.TIMED),
+        cmd=1, hour=25, minute=0,
+        days=0,  # disabled
+    )
+    loc = PanelLocation(latitude=43.6, longitude=-116.2)
+    now = datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    assert _next_sun_relative_fire(now, p, loc) is None
+
+
+@pytest.mark.asyncio
+async def test_engine_sun_relative_without_location_is_skipped() -> None:
+    """Engine with no PanelLocation drops sunrise/sunset programs."""
+    t0 = datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    p = Program(
+        slot=1, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=5,
+        hour=25, minute=0,  # AT_SUNRISE
+        days=int(Days.THURSDAY),
+    )
+    panel = _panel_with_programs(p)
+    clock = FakeClock(t0)
+    async with ProgramEngine(panel, clock=clock) as engine:
+        # No location → worker returns immediately, never fires.
+        await asyncio.sleep(0)
+        await clock.advance_to(t0 + timedelta(days=2))
+        await asyncio.sleep(0)
+        assert engine.metrics.timed_fired == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_fires_sun_relative_program_with_location() -> None:
+    """End-to-end: TIMED AT_SUNSET program fires at astral-computed
+    sunset when the clock advances past it."""
+    loc = PanelLocation(
+        name="Boise", region="US", timezone="UTC",
+        latitude=43.6, longitude=-116.2,
+    )
+    p = Program(
+        slot=1, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=5,
+        hour=26, minute=0,  # AT_SUNSET
+        days=int(Days.THURSDAY),
+    )
+    # Start at midnight UTC on a Thursday.
+    t0 = datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    panel = _panel_with_programs(p)
+    clock = FakeClock(t0)
+    async with ProgramEngine(panel, clock=clock, location=loc) as engine:
+        await asyncio.sleep(0)
+        # Advance well past sunset (which is roughly 03:00 UTC Friday).
+        await clock.advance_to(t0 + timedelta(days=2))
+        await asyncio.sleep(0)
+        assert engine.metrics.timed_fired == 1
+        assert panel.state.units[5].state == 1
