@@ -601,6 +601,152 @@ async def test_engine_sun_relative_without_location_is_skipped() -> None:
         assert engine.metrics.timed_fired == 0
 
 
+# ---- Phase 4: EVENT programs --------------------------------------------
+
+
+from omni_pca.program_engine import (  # noqa: E402
+    EVENT_AC_POWER_OFF,
+    event_id_unit_state,
+    event_id_user_macro_button,
+    event_id_zone_state,
+)
+
+
+def test_event_id_user_macro_button_packs_low_byte() -> None:
+    assert event_id_user_macro_button(1) == 0x0001
+    assert event_id_user_macro_button(255) == 0x00FF
+
+
+def test_event_id_user_macro_button_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError):
+        event_id_user_macro_button(0)
+    with pytest.raises(ValueError):
+        event_id_user_macro_button(256)
+
+
+def test_event_id_zone_state_encodes_zone_and_state() -> None:
+    # Zone 1 state 0 (secure) → 0x0400 base.
+    assert event_id_zone_state(1, 0) == 0x0400
+    assert event_id_zone_state(1, 3) == 0x0403  # tamper
+    # Zone 2 state 0 = 0x0404 (2-1)*4+0
+    assert event_id_zone_state(2, 0) == 0x0404
+
+
+def test_event_id_unit_state_encodes_unit_and_on_off() -> None:
+    assert event_id_unit_state(1, on=False) == 0x0800
+    assert event_id_unit_state(1, on=True) == 0x0801
+    assert event_id_unit_state(2, on=True) == 0x0803
+
+
+@pytest.mark.asyncio
+async def test_engine_emit_event_fires_subscribed_program() -> None:
+    """An EVENT program with event_id matching the emit fires."""
+    button_evt = event_id_user_macro_button(5)
+    # EVENT program stores event_id in (month<<8)|day per programs.event_id.
+    p = Program(
+        slot=1, prog_type=int(ProgramType.EVENT),
+        cmd=int(Command.UNIT_ON), pr2=7,
+        month=(button_evt >> 8) & 0xFF, day=button_evt & 0xFF,
+    )
+    panel = _panel_with_programs(p)
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        fired = await engine.emit_user_macro_button(5)
+        assert fired == 1
+        assert engine.metrics.event_fired == 1
+        assert panel.state.units[7].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_emit_event_no_match_returns_zero() -> None:
+    """Emitting an event with no subscribed program is a silent no-op."""
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=MockState())
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        assert await engine.emit_user_macro_button(99) == 0
+        assert engine.metrics.event_fired == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_emit_event_before_start_is_no_op() -> None:
+    """emit_event on an un-started engine doesn't raise — just returns 0."""
+    p = Program(
+        slot=1, prog_type=int(ProgramType.EVENT),
+        cmd=1, month=0, day=1,
+    )
+    panel = _panel_with_programs(p)
+    engine = ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    ))
+    assert await engine.emit_event(1) == 0  # not started yet
+
+
+@pytest.mark.asyncio
+async def test_engine_multiple_programs_on_same_event() -> None:
+    """Two EVENT programs subscribed to the same event both fire."""
+    evt = event_id_user_macro_button(3)
+    hi = (evt >> 8) & 0xFF
+    lo = evt & 0xFF
+    p1 = Program(
+        slot=1, prog_type=int(ProgramType.EVENT),
+        cmd=int(Command.UNIT_ON), pr2=5,
+        month=hi, day=lo,
+    )
+    p2 = Program(
+        slot=2, prog_type=int(ProgramType.EVENT),
+        cmd=int(Command.UNIT_ON), pr2=6,
+        month=hi, day=lo,
+    )
+    panel = _panel_with_programs(p1, p2)
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        fired = await engine.emit_user_macro_button(3)
+        assert fired == 2
+        assert panel.state.units[5].state == 1
+        assert panel.state.units[6].state == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_zone_state_emit_helper() -> None:
+    """emit_zone_state fires programs matching that exact (zone, state)."""
+    evt = event_id_zone_state(7, 1)  # zone 7 not-ready
+    p = Program(
+        slot=10, prog_type=int(ProgramType.EVENT),
+        cmd=int(Command.UNIT_ON), pr2=12,
+        month=(evt >> 8) & 0xFF, day=evt & 0xFF,
+    )
+    panel = _panel_with_programs(p)
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        # Wrong state — no fire.
+        assert await engine.emit_zone_state(7, 0) == 0
+        assert engine.metrics.event_fired == 0
+        # Right state — fire.
+        assert await engine.emit_zone_state(7, 1) == 1
+        assert engine.metrics.event_fired == 1
+
+
+@pytest.mark.asyncio
+async def test_engine_fixed_event_constants() -> None:
+    """The hand-rolled fixed-ID events (PHONE/AC_POWER) dispatch correctly."""
+    p = Program(
+        slot=1, prog_type=int(ProgramType.EVENT),
+        cmd=int(Command.UNIT_ON), pr2=4,
+        month=(EVENT_AC_POWER_OFF >> 8) & 0xFF,
+        day=EVENT_AC_POWER_OFF & 0xFF,
+    )
+    panel = _panel_with_programs(p)
+    async with ProgramEngine(panel, clock=FakeClock(
+        datetime(2026, 5, 14, 0, 0, tzinfo=timezone.utc)
+    )) as engine:
+        fired = await engine.emit_event(EVENT_AC_POWER_OFF)
+        assert fired == 1
+
+
 @pytest.mark.asyncio
 async def test_engine_fires_sun_relative_program_with_location() -> None:
     """End-to-end: TIMED AT_SUNSET program fires at astral-computed

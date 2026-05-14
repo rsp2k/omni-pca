@@ -419,6 +419,64 @@ def _command_payload(program: Program) -> bytes:
 
 
 # --------------------------------------------------------------------------
+# Event taxonomy
+# --------------------------------------------------------------------------
+
+
+# Event-ID encoding mirrors clsText.GetEventCategory (clsText.cs:1585-...).
+# Each event has a 16-bit ID; bit-pattern masks pick out the category, and
+# the low-order bits within each category encode the object number / state.
+# We expose helper builders rather than a full enuEventType mirror — the
+# common cases below cover what TIMED-program authors actually wire up.
+
+
+def event_id_user_macro_button(button: int) -> int:
+    """Event ID fired when a panel button macro runs.
+
+    Category mask: ``(evt & 0xFF00) == 0x0000``. The low byte holds the
+    1-based button number (1..255).
+    """
+    if not 1 <= button <= 255:
+        raise ValueError(f"button {button} out of range 1..255")
+    return button & 0xFF
+
+
+def event_id_zone_state(zone: int, state: int) -> int:
+    """Event ID for a zone-state change.
+
+    Category mask: ``(evt & 0xFC00) == 0x0400`` (high bits 0b000001).
+    Low 10 bits encode zone × state per clsText: ``(zone - 1) * 4 + state``
+    where state is the 2-bit "current_state" code (0=secure, 1=not-ready,
+    2=trouble, 3=tamper). Range fits 256 zones × 4 states = 1024 IDs.
+    """
+    if not 1 <= zone <= 256:
+        raise ValueError(f"zone {zone} out of range 1..256")
+    if not 0 <= state <= 3:
+        raise ValueError(f"state {state} out of range 0..3")
+    return 0x0400 | (((zone - 1) * 4 + state) & 0x03FF)
+
+
+def event_id_unit_state(unit: int, on: bool) -> int:
+    """Event ID for a unit (light/output) state change.
+
+    Category mask: ``(evt & 0xFC00) == 0x0800``. Low bits encode
+    ``(unit - 1) * 2 + (1 if on else 0)`` per clsText.
+    """
+    if not 1 <= unit <= 511:
+        raise ValueError(f"unit {unit} out of range 1..511")
+    return 0x0800 | (((unit - 1) * 2 + (1 if on else 0)) & 0x03FF)
+
+
+# Hand-rolled fixed-ID events from clsText.cs:1647-... (PHONE/AC_POWER/etc.).
+EVENT_PHONE_DEAD: int = 768
+EVENT_PHONE_RINGING: int = 769
+EVENT_PHONE_OFF_HOOK: int = 770
+EVENT_PHONE_ON_HOOK: int = 771
+EVENT_AC_POWER_OFF: int = 772
+EVENT_AC_POWER_ON: int = 773
+
+
+# --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
 
@@ -478,6 +536,10 @@ class ProgramEngine:
         self._classified = classify(self._programs)
         self._tasks: list[asyncio.Task[None]] = []
         self._running = False
+        # event_id → list of EVENT programs that fire on it. Built lazily
+        # in start() so callers can mutate state.programs between init
+        # and start (e.g. a test seeding extra programs).
+        self._event_table: dict[int, list[Program]] = {}
         self.metrics = _EngineMetrics()
 
     # ---- inspection -------------------------------------------------------
@@ -523,6 +585,12 @@ class ProgramEngine:
                     name=f"omni-pca-yearly-slot-{program.slot}",
                 )
             )
+        # Phase 4: EVENT programs aren't long-running tasks — they just
+        # register in the event table and the engine dispatches on
+        # emit_event(). Build the table now so emit is O(1).
+        self._event_table.clear()
+        for program in self._classified.event:
+            self._event_table.setdefault(program.event_id, []).append(program)
 
     async def _run_timed_program(self, program: Program) -> None:
         """Sleep-until-next-fire loop for one TIMED program.
@@ -559,6 +627,43 @@ class ProgramEngine:
                 "engine: TIMED slot %s crashed", program.slot,
             )
             self.metrics.errors += 1
+
+    # ---- event dispatch (Phase 4) ----------------------------------------
+
+    async def emit_event(self, event_id: int) -> int:
+        """Fire every EVENT program subscribed to ``event_id``.
+
+        Returns the number of programs that fired. Safe to call before
+        ``start()`` (returns 0 since no event table is built yet) or
+        after ``stop()`` (programs registered while running aren't
+        retained — call start again to rebuild).
+
+        The classic use cases are wired up via the convenience helpers
+        below, but tests and HA code can also call this directly with
+        any raw ``event_id``.
+        """
+        if not self._running:
+            return 0
+        programs = self._event_table.get(event_id, ())
+        for program in programs:
+            await self._fire(program)
+        return len(programs)
+
+    async def emit_user_macro_button(self, button: int) -> int:
+        """Convenience: fire EVENT programs subscribed to a button press."""
+        return await self.emit_event(event_id_user_macro_button(button))
+
+    async def emit_zone_state(self, zone: int, state: int) -> int:
+        """Convenience: fire EVENT programs subscribed to a zone-state change.
+
+        ``state`` is the 2-bit current_state code: 0=secure, 1=not-ready,
+        2=trouble, 3=tamper. Matches MockZoneState.current_state.
+        """
+        return await self.emit_event(event_id_zone_state(zone, state))
+
+    async def emit_unit_state(self, unit: int, on: bool) -> int:
+        """Convenience: fire EVENT programs subscribed to a unit on/off."""
+        return await self.emit_event(event_id_unit_state(unit, on))
 
     async def _run_yearly_program(self, program: Program) -> None:
         """Sleep-until-next-fire loop for one YEARLY program."""
