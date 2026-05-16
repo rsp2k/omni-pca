@@ -381,6 +381,128 @@ async def _ws_get_program(
     })
 
 
+_PROGRAM_FIELD_SCHEMA = vol.Schema(
+    {
+        vol.Required("prog_type"): vol.All(int, vol.Range(min=0, max=10)),
+        vol.Optional("cond", default=0): vol.All(int, vol.Range(min=0, max=0xFFFF)),
+        vol.Optional("cond2", default=0): vol.All(int, vol.Range(min=0, max=0xFFFF)),
+        vol.Optional("cmd", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("par", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("pr2", default=0): vol.All(int, vol.Range(min=0, max=0xFFFF)),
+        vol.Optional("month", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("day", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("days", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("hour", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("minute", default=0): vol.All(int, vol.Range(min=0, max=0xFF)),
+        vol.Optional("remark_id"): vol.Any(None, vol.All(int, vol.Range(min=0))),
+    },
+    extra=vol.PREVENT_EXTRA,
+)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "omni_pca/objects/list",
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def _ws_list_objects(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return discovered objects so the frontend editor can populate
+    object pickers (zone / unit / area / thermostat / button).
+
+    Returns a flat dict mapping each kind to a list of
+    ``{index, name}`` entries in slot order. Cached client-side after
+    the first call — the topology doesn't change unless the user
+    reloads the integration.
+    """
+    coordinator = _coordinator_for_entry(hass, msg["entry_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "panel not configured")
+        return
+    data = coordinator.data
+    if data is None:
+        connection.send_result(msg["id"], {})
+        return
+
+    def _flatten(bucket) -> list[dict[str, Any]]:
+        return [
+            {"index": idx, "name": getattr(obj, "name", "") or f"slot {idx}"}
+            for idx, obj in sorted(bucket.items())
+        ]
+
+    connection.send_result(msg["id"], {
+        "zones": _flatten(data.zones),
+        "units": _flatten(data.units),
+        "areas": _flatten(data.areas),
+        "thermostats": _flatten(data.thermostats),
+        "buttons": _flatten(data.buttons),
+    })
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "omni_pca/programs/write",
+        vol.Required("entry_id"): str,
+        vol.Required("slot"): vol.All(int, vol.Range(min=1, max=1500)),
+        vol.Required("program"): dict,
+    }
+)
+@websocket_api.async_response
+async def _ws_write_program(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Write an arbitrary Program record to ``slot``.
+
+    The ``program`` payload is a JSON-friendly dict mirroring the
+    :class:`omni_pca.programs.Program` dataclass — every field passed
+    by name. Default 0 for fields the caller omits (matches the
+    dataclass defaults). ``remark_id`` is optional / None.
+
+    Frontend's edit form posts the whole struct on save; the slot is
+    re-stamped to ``msg["slot"]`` in case the caller forgot. Saves
+    update ``coordinator.data.programs[slot]`` immediately so the
+    next list call shows the edit before the next poll catches up.
+    """
+    coordinator = _coordinator_for_entry(hass, msg["entry_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "panel not configured")
+        return
+    try:
+        validated = _PROGRAM_FIELD_SCHEMA(msg["program"])
+    except vol.Invalid as err:
+        connection.send_error(msg["id"], "invalid", f"bad program payload: {err}")
+        return
+    try:
+        client = coordinator.client
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "not_connected", str(err))
+        return
+
+    from omni_pca.programs import Program  # local — avoid cycle
+
+    program = Program(slot=msg["slot"], **validated)
+    try:
+        await client.download_program(msg["slot"], program)
+    except NotImplementedError as err:
+        connection.send_error(msg["id"], "not_supported", str(err))
+        return
+    except Exception as err:
+        connection.send_error(msg["id"], "write_failed", str(err))
+        return
+    if coordinator.data is not None:
+        coordinator.data.programs[msg["slot"]] = program
+    connection.send_result(
+        msg["id"], {"slot": msg["slot"], "written": True},
+    )
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "omni_pca/programs/clear",
@@ -557,6 +679,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_fire_program)
     websocket_api.async_register_command(hass, _ws_clear_program)
     websocket_api.async_register_command(hass, _ws_clone_program)
+    websocket_api.async_register_command(hass, _ws_write_program)
+    websocket_api.async_register_command(hass, _ws_list_objects)
 
 
 # --------------------------------------------------------------------------

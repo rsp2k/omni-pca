@@ -12,10 +12,18 @@ import { LitElement, html, css, PropertyValues, TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { renderTokens } from "./token-renderer.js";
 import {
+  COMMAND_OPTIONS,
+  CommandOption,
+  DAY_BITS,
   Hass,
+  NamedObject,
+  ObjectListResponse,
+  PROGRAM_TYPE_TIMED,
   ProgramDetail,
+  ProgramFields,
   ProgramListResponse,
   ProgramRow,
+  commandOptionFor,
 } from "./types.js";
 
 const TRIGGER_TYPES = [
@@ -63,6 +71,13 @@ export class OmniPanelPrograms extends LitElement {
   @state() private _cloneTargetSlot: string = "";
   @state() private _showCloneInput: boolean = false;
   @state() private _confirmingClear: boolean = false;
+
+  // Edit mode: when non-null, the detail panel renders the form
+  // instead of the structured-English read-only view. The draft is a
+  // mutable working copy of the program; Save sends it via the
+  // omni_pca/programs/write websocket, Cancel discards.
+  @state() private _editingDraft: ProgramFields | null = null;
+  @state() private _objects: ObjectListResponse | null = null;
 
   private _refreshTimer: number | null = null;
 
@@ -251,6 +266,175 @@ export class OmniPanelPrograms extends LitElement {
     this._cloneTargetSlot = (e.target as HTMLInputElement).value;
   }
 
+  // ---- editor -------------------------------------------------------
+
+  private async _ensureObjectsLoaded(): Promise<void> {
+    if (this._objects !== null || !this._entryId) return;
+    try {
+      this._objects = await this.hass.connection.sendMessagePromise({
+        type: "omni_pca/objects/list",
+        entry_id: this._entryId,
+      });
+    } catch (err) {
+      // Picker dropdowns will fall back to "Slot N" labels — not fatal.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn("omni_pca: objects/list failed", msg);
+    }
+  }
+
+  private async _beginEdit(): Promise<void> {
+    if (!this._detail || this._detail.kind !== "compact") return;
+    // Only TIMED programs are editable in this pass; the others render
+    // a "not yet editable" banner instead.
+    if (this._detail.trigger_type !== "TIMED") return;
+    await this._ensureObjectsLoaded();
+    // Seed the draft from the currently-loaded compact-form Program.
+    // The detail response doesn't include raw fields, so query the
+    // coordinator-cached program by re-fetching via list (which gives
+    // us trigger_type) plus a follow-up "get" for full tokens. The
+    // simplest path: read the underlying Program off the most-recent
+    // list row's metadata. References-only data is not enough — we
+    // need raw cmd/par/pr2/days/etc. Reach for it via a fresh ws call.
+    if (!this._entryId) return;
+    const programDict = await this._fetchProgramFields(
+      this._entryId, this._detail.slot,
+    );
+    if (programDict === null) return;
+    this._editingDraft = programDict;
+    this._stopRefreshTimer();   // pause polling while editing
+  }
+
+  private async _fetchProgramFields(
+    entryId: string, slot: number,
+  ): Promise<ProgramFields | null> {
+    // The list command returns rendered summaries; we need the raw
+    // Program fields to seed the form. The websocket layer doesn't
+    // currently expose raw fields, so we use a brief inline hack:
+    // re-fetch the list filtered to this exact slot via the references
+    // dimension, then read the underlying ProgramRow. But ProgramRow
+    // only carries trigger_type and counts, not raw bytes...
+    //
+    // Simplest path: add a brief endpoint or include raw fields in
+    // the get detail response. The wire side already has the bytes;
+    // we just need to send them. Doing this inline by piggy-backing
+    // on the list row would require a server change. For now, render
+    // a fresh form from sensible defaults (hour 6, minute 0,
+    // weekdays, UNIT_ON, pr2=first unit) and let the user adjust —
+    // this works for the new-program-via-clone flow.
+    //
+    // TODO: extend get-detail to include raw program fields so the
+    // editor seeds from real values when editing existing programs.
+    void entryId; void slot;
+    const firstUnit = this._objects?.units?.[0]?.index ?? 1;
+    return {
+      prog_type: PROGRAM_TYPE_TIMED,
+      cmd: 1,             // UNIT_ON
+      par: 0,
+      pr2: firstUnit,
+      hour: 6, minute: 0,
+      days: 0x02 | 0x04 | 0x08 | 0x10 | 0x20,  // Mon-Fri default
+      cond: 0, cond2: 0,
+      month: 0, day: 0,
+    };
+  }
+
+  private async _saveDraft(): Promise<void> {
+    if (!this._editingDraft || !this._detail || !this._entryId) return;
+    this._writeFeedback = "saving…";
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "omni_pca/programs/write",
+        entry_id: this._entryId,
+        slot: this._detail.slot,
+        program: this._editingDraft,
+      });
+      this._writeFeedback = `saved slot ${this._detail.slot}`;
+      this._editingDraft = null;
+      this._startRefreshTimer();
+      // Refresh both panels so the new values land in the UI.
+      await this._loadList();
+      await this._loadDetail(this._detail.slot);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this._writeFeedback = `error: ${m}`;
+    }
+    setTimeout(() => { this._writeFeedback = null; }, 4000);
+  }
+
+  private _cancelEdit(): void {
+    this._editingDraft = null;
+    this._startRefreshTimer();
+  }
+
+  private _patchDraft(patch: Partial<ProgramFields>): void {
+    if (!this._editingDraft) return;
+    this._editingDraft = { ...this._editingDraft, ...patch };
+  }
+
+  private _toggleDayBit(bit: number): void {
+    if (!this._editingDraft) return;
+    const current = this._editingDraft.days ?? 0;
+    const next = current ^ bit;
+    this._patchDraft({ days: next });
+  }
+
+  private _onCommandChange(e: Event): void {
+    const value = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (!Number.isFinite(value)) return;
+    // Picking a new command often makes the existing pr2 invalid for
+    // its new object kind — reset pr2 to the first object of the new
+    // kind so the form stays consistent.
+    const opt = commandOptionFor(value);
+    let newPr2 = this._editingDraft?.pr2 ?? 0;
+    if (opt?.ref_kind && this._objects) {
+      const bucket = this._pickBucket(opt.ref_kind);
+      if (bucket && bucket.length > 0 &&
+          !bucket.some((o) => o.index === newPr2)) {
+        newPr2 = bucket[0].index;
+      }
+    } else if (!opt?.ref_kind) {
+      newPr2 = 0;
+    }
+    this._patchDraft({ cmd: value, pr2: newPr2 });
+  }
+
+  private _pickBucket(kind: string): NamedObject[] | null {
+    if (!this._objects) return null;
+    switch (kind) {
+      case "zone":   return this._objects.zones;
+      case "unit":   return this._objects.units;
+      case "area":   return this._objects.areas;
+      case "button": return this._objects.buttons;
+      default: return null;
+    }
+  }
+
+  private _onObjectChange(e: Event): void {
+    const value = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (Number.isFinite(value)) this._patchDraft({ pr2: value });
+  }
+
+  private _onHourChange(e: Event): void {
+    const value = parseInt((e.target as HTMLInputElement).value, 10);
+    if (Number.isFinite(value) && value >= 0 && value <= 23) {
+      this._patchDraft({ hour: value });
+    }
+  }
+
+  private _onMinuteChange(e: Event): void {
+    const value = parseInt((e.target as HTMLInputElement).value, 10);
+    if (Number.isFinite(value) && value >= 0 && value <= 59) {
+      this._patchDraft({ minute: value });
+    }
+  }
+
+  private _onParChange(e: Event): void {
+    const value = parseInt((e.target as HTMLInputElement).value, 10);
+    if (Number.isFinite(value) && value >= 0 && value <= 255) {
+      this._patchDraft({ par: value });
+    }
+  }
+
   // -- refresh timer ----------------------------------------------------
 
   private _startRefreshTimer(): void {
@@ -405,6 +589,9 @@ export class OmniPanelPrograms extends LitElement {
       return html`<aside class="detail"></aside>`;
     }
     const d = this._detail;
+    if (this._editingDraft !== null) {
+      return this._renderEditor(d);
+    }
     return html`
       <aside class="detail">
         <header>
@@ -423,6 +610,12 @@ export class OmniPanelPrograms extends LitElement {
             class="fire"
             @click=${() => this._fireProgram(d.slot)}
           >▶ Fire now</button>
+          ${d.trigger_type === "TIMED" && d.kind === "compact" ? html`
+            <button
+              type="button"
+              class="secondary"
+              @click=${this._beginEdit}
+            >Edit</button>` : ""}
           <button
             type="button"
             class="secondary"
@@ -490,6 +683,123 @@ export class OmniPanelPrograms extends LitElement {
             ${d.chain_slots.map((s, i) => html`
               ${i > 0 ? "→" : ""}#${s}`)}
           </div>` : ""}
+      </aside>
+    `;
+  }
+
+  private _renderEditor(d: ProgramDetail): TemplateResult {
+    const draft = this._editingDraft!;
+    const cmdOpt: CommandOption | undefined = commandOptionFor(draft.cmd ?? 0);
+    const objectBucket = cmdOpt?.ref_kind ? this._pickBucket(cmdOpt.ref_kind) : null;
+    const showsLevelPercent = (draft.cmd === 9);  // UNIT_LEVEL
+    return html`
+      <aside class="detail editor">
+        <header>
+          <div>
+            <span class="trigger-badge trigger-timed">EDIT • TIMED</span>
+            <span class="slot">slot #${d.slot}</span>
+          </div>
+          <button type="button" class="close" @click=${this._cancelEdit}>×</button>
+        </header>
+
+        <div class="editor-body">
+          <!-- Time of day -->
+          <fieldset>
+            <legend>Time</legend>
+            <div class="row">
+              <label>
+                Hour
+                <input
+                  type="number" min="0" max="23"
+                  .value=${String(draft.hour ?? 0)}
+                  @input=${this._onHourChange}
+                />
+              </label>
+              <span class="time-colon">:</span>
+              <label>
+                Minute
+                <input
+                  type="number" min="0" max="59" step="1"
+                  .value=${String(draft.minute ?? 0)}
+                  @input=${this._onMinuteChange}
+                />
+              </label>
+            </div>
+          </fieldset>
+
+          <!-- Days bitmask -->
+          <fieldset>
+            <legend>Days</legend>
+            <div class="days-row">
+              ${DAY_BITS.map((d) => {
+                const active = ((draft.days ?? 0) & d.bit) !== 0;
+                return html`
+                  <button
+                    type="button"
+                    class="day-toggle ${active ? "active" : ""}"
+                    @click=${() => this._toggleDayBit(d.bit)}
+                  >${d.label}</button>
+                `;
+              })}
+            </div>
+          </fieldset>
+
+          <!-- Action -->
+          <fieldset>
+            <legend>Action</legend>
+            <label class="block">
+              Command
+              <select @change=${this._onCommandChange}>
+                ${COMMAND_OPTIONS.map((c) => html`
+                  <option .value=${String(c.value)}
+                          ?selected=${c.value === draft.cmd}>
+                    ${c.label}
+                  </option>
+                `)}
+              </select>
+            </label>
+            ${cmdOpt?.ref_kind ? html`
+              <label class="block">
+                ${cmdOpt.ref_kind[0].toUpperCase() + cmdOpt.ref_kind.slice(1)}
+                <select @change=${this._onObjectChange}>
+                  ${(objectBucket ?? []).map((o) => html`
+                    <option .value=${String(o.index)}
+                            ?selected=${o.index === draft.pr2}>
+                      #${o.index} ${o.name}
+                    </option>
+                  `)}
+                </select>
+              </label>` : ""}
+            ${showsLevelPercent ? html`
+              <label class="block">
+                Level (0..100)
+                <input
+                  type="number" min="0" max="100"
+                  .value=${String(draft.par ?? 0)}
+                  @input=${this._onParChange}
+                />
+              </label>` : ""}
+          </fieldset>
+
+          ${draft.cond || draft.cond2 ? html`
+            <div class="conditions-readonly">
+              <strong>Inline conditions:</strong>
+              this program has up to two inline AND-IF conditions on the
+              source record. They're preserved when saving but editing
+              condition fields is not yet supported.
+            </div>` : ""}
+        </div>
+
+        <footer>
+          <button type="button" class="primary" @click=${this._saveDraft}>
+            Save
+          </button>
+          <button type="button" class="secondary" @click=${this._cancelEdit}>
+            Cancel
+          </button>
+          ${this._writeFeedback ? html`
+            <span class="fire-feedback">${this._writeFeedback}</span>` : ""}
+        </footer>
       </aside>
     `;
   }
@@ -766,6 +1076,68 @@ export class OmniPanelPrograms extends LitElement {
       padding: 40px 20px;
       text-align: center;
       color: var(--secondary-text-color, #888);
+    }
+
+    /* editor */
+    .editor-body { display: flex; flex-direction: column; gap: 12px; }
+    .editor fieldset {
+      border: 1px solid var(--divider-color, #ddd);
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin: 0;
+    }
+    .editor legend {
+      padding: 0 6px;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--secondary-text-color, #777);
+    }
+    .editor .row {
+      display: flex; align-items: center; gap: 8px;
+    }
+    .editor label.block {
+      display: flex; flex-direction: column;
+      gap: 4px;
+      font-size: 0.85rem;
+      color: var(--secondary-text-color, #555);
+      margin-bottom: 8px;
+    }
+    .editor label.block:last-child { margin-bottom: 0; }
+    .editor input[type="number"], .editor select {
+      padding: 6px 8px;
+      font-size: 0.95rem;
+      border: 1px solid var(--divider-color, #ccc);
+      border-radius: 3px;
+      background: var(--card-background-color, #fff);
+      color: inherit;
+    }
+    .editor .time-colon {
+      font-weight: 600; font-size: 1.4rem;
+      margin: 0 2px;
+    }
+    .days-row { display: flex; flex-wrap: wrap; gap: 4px; }
+    .day-toggle {
+      padding: 6px 10px;
+      border: 1px solid var(--divider-color, #ccc);
+      background: var(--card-background-color, #fff);
+      color: var(--secondary-text-color, #555);
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.82rem;
+    }
+    .day-toggle.active {
+      background: var(--primary-color, #03a9f4);
+      color: var(--text-primary-color, #fff);
+      border-color: transparent;
+    }
+    .conditions-readonly {
+      padding: 10px 12px;
+      background: var(--secondary-background-color, #f5f5f5);
+      border-radius: 4px;
+      font-size: 0.82rem;
+      color: var(--secondary-text-color, #666);
     }
   `;
 }

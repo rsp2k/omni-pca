@@ -325,6 +325,104 @@ async def test_ws_clone_program_rejects_missing_source(
     assert response["error"]["code"] == "not_found"
 
 
+async def test_ws_write_program_creates_new_slot(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Writing a Program dict to an empty slot lands a new program."""
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    assert 700 not in coordinator.data.programs
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/write",
+        "entry_id": configured_panel.entry_id,
+        "slot": 700,
+        "program": {
+            "prog_type": 1,        # TIMED
+            "cmd": int(Command.UNIT_ON),
+            "pr2": 2,
+            "hour": 7, "minute": 30,
+            "days": int(Days.SATURDAY | Days.SUNDAY),
+        },
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    assert response["result"] == {"slot": 700, "written": True}
+    new_program = coordinator.data.programs[700]
+    assert new_program.slot == 700
+    assert new_program.cmd == int(Command.UNIT_ON)
+    assert new_program.pr2 == 2
+    assert new_program.hour == 7 and new_program.minute == 30
+
+
+async def test_ws_write_program_overwrites_existing_slot(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Writing to a slot that has a program replaces the existing one."""
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    # Slot 12 is seeded (TIMED hour=6 minute=0). Rewrite it.
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/write",
+        "entry_id": configured_panel.entry_id,
+        "slot": 12,
+        "program": {
+            "prog_type": 1,
+            "cmd": int(Command.UNIT_OFF),
+            "pr2": 99,
+            "hour": 23, "minute": 45, "days": int(Days.MONDAY),
+        },
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    updated = coordinator.data.programs[12]
+    assert updated.cmd == int(Command.UNIT_OFF)
+    assert updated.pr2 == 99
+    assert updated.hour == 23 and updated.minute == 45
+
+
+async def test_ws_write_program_validates_payload(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Bad program dict (out-of-range field) returns structured error."""
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/write",
+        "entry_id": configured_panel.entry_id,
+        "slot": 12,
+        "program": {
+            "prog_type": 99,  # invalid (max 10)
+            "cmd": 1, "pr2": 1, "hour": 6, "minute": 0,
+        },
+    })
+    response = await client.receive_json()
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid"
+
+
+async def test_ws_list_objects_returns_named_buckets(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """objects/list returns zones/units/areas/thermostats/buttons in
+    slot-sorted order with their HA-discovered names."""
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/objects/list",
+        "entry_id": configured_panel.entry_id,
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    result = response["result"]
+    assert {"zones", "units", "areas", "thermostats", "buttons"} <= result.keys()
+    # Fixture has units at indexes 1, 2 (LIVING_LAMP, KITCHEN_OVERHEAD-truncated).
+    units = result["units"]
+    assert len(units) == 2
+    assert units[0]["index"] == 1
+    assert units[0]["name"] == "LIVING_LAMP"
+    # And zones come back with their fixture names too.
+    zones_by_idx = {z["index"]: z["name"] for z in result["zones"]}
+    assert zones_by_idx[1] == "FRONT_DOOR"
+
+
 async def test_ws_list_programs_live_state_overlay_zone(
     hass: HomeAssistant, configured_panel, hass_ws_client
 ) -> None:
