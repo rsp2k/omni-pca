@@ -137,18 +137,37 @@ export class OmniPanelPrograms extends LitElement {
     // Best-effort: walk known config entries via HA's standard
     // config_entries/get command. If that fails we surface a friendly
     // error pointing at integration setup.
+    //
+    // NOTE: this runs fire-and-forget from connectedCallback (and from
+    // the hass-update path), so we need to kick off the initial list
+    // *here*, after _entryId lands. Earlier versions checked _entryId
+    // synchronously right after calling discover, which always saw
+    // null and silently skipped loadList — the panel rendered "no
+    // programs" forever until the first manual refresh.
     try {
       const entries = await this.hass.connection.sendMessagePromise<
-        Array<{ entry_id: string; domain: string; title: string }>
+        Array<{ entry_id: string; domain: string; title: string; state?: string }>
       >({ type: "config_entries/get" });
       const ours = entries.filter((e) => e.domain === "omni_pca");
       if (ours.length === 0) {
         this._error = "No Omni panel configured. Add one via Settings → Devices & Services.";
         return;
       }
-      // First entry wins for v1; multi-panel selector is a follow-up.
-      this._entryId = ours[0].entry_id;
+      // Prefer entries that are actually loaded — a config entry in
+      // setup_retry or migration_error has no live coordinator, and
+      // the websocket commands return "panel not configured" against
+      // it. Multi-loaded-panel installs still pick the first loaded
+      // one; a multi-panel selector is a follow-up.
+      const loaded = ours.find((e) => e.state === "loaded");
+      this._entryId = (loaded ?? ours[0]).entry_id;
       this._error = null;
+      // Kick off the initial list + start the live-state refresh timer.
+      // Both are safe to call from here regardless of whether the
+      // caller (connectedCallback / updated) also expected to start
+      // them; _loadList is reentrant-safe and _startRefreshTimer is
+      // idempotent.
+      void this._loadList();
+      this._startRefreshTimer();
     } catch (err) {
       this._error = `Could not discover panels: ${err instanceof Error ? err.message : String(err)}`;
     }

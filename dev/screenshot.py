@@ -298,6 +298,72 @@ async def _take_screenshots(ha_url: str, token: str, outdir: Path) -> list[Path]
         await shot("06-developer-states.png",
                    "/developer-tools/state", wait_secs=4.0)
 
+        # The side panel registered by panel_custom (websocket.py:
+        # async_register_side_panel). If pointed at a real panel the
+        # program list is whatever the homeowner has authored; against
+        # the mock it's whatever ``run_mock_panel.py`` seeded. We
+        # deliberately do NOT write programs from here because the
+        # screenshot script may be aimed at real hardware.
+        await shot("08-side-panel-programs.png",
+                   "/omni-panel-programs", wait_secs=6.0)
+        # Helper: locate the omni-panel-programs element regardless of
+        # what shadow-DOM path HA's panel host wraps it in. Recursive
+        # walk because partial-panel-resolver / hui-view / etc. can
+        # vary between HA versions.
+        find_panel_js = """
+          (() => {
+            function find(root, depth=0) {
+              if (!root || depth > 15) return null;
+              if (root.tagName === 'OMNI-PANEL-PROGRAMS') return root;
+              for (const k of Array.from(root.children || [])) {
+                const r = find(k, depth+1);
+                if (r) return r;
+              }
+              if (root.shadowRoot) {
+                const r = find(root.shadowRoot, depth+1);
+                if (r) return r;
+              }
+              return null;
+            }
+            return find(document.body);
+          })()
+        """
+
+        # Click into the first program row to capture the detail panel.
+        try:
+            await page.evaluate(f"""() => {{
+              const panel = {find_panel_js};
+              if (!panel) {{ console.warn('omni panel not found'); return; }}
+              const row = panel.shadowRoot.querySelector('.row');
+              if (row) row.click();
+            }}""")
+            await page.wait_for_timeout(800)
+        except Exception as e:
+            print(f"    click-into-row warning: {e}")
+        # Re-shoot WITHOUT a navigate (page.goto would reset selection).
+        await page.screenshot(path=str(outdir / "09-side-panel-detail.png"),
+                              full_page=False)
+        shots.append(outdir / "09-side-panel-detail.png")
+        print(f"  → 09-side-panel-detail.png  (in-place)")
+
+        # Click "Edit" to capture the editor mode.
+        try:
+            await page.evaluate(f"""() => {{
+              const panel = {find_panel_js};
+              if (!panel) {{ console.warn('omni panel not found'); return; }}
+              const buttons = panel.shadowRoot.querySelectorAll('.detail button');
+              for (const b of buttons) {{
+                if (b.textContent.trim() === 'Edit') {{ b.click(); break; }}
+              }}
+            }}""")
+            await page.wait_for_timeout(800)
+        except Exception as e:
+            print(f"    click-edit warning: {e}")
+        await page.screenshot(path=str(outdir / "10-side-panel-editor.png"),
+                              full_page=False)
+        shots.append(outdir / "10-side-panel-editor.png")
+        print(f"  → 10-side-panel-editor.png  (in-place)")
+
         await browser.close()
     return shots
 
