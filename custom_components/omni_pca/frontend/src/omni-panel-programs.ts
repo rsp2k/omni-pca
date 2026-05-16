@@ -59,6 +59,10 @@ export class OmniPanelPrograms extends LitElement {
   @state() private _detail: ProgramDetail | null = null;
   @state() private _detailLoading = false;
   @state() private _fireFeedback: string | null = null;
+  @state() private _writeFeedback: string | null = null;
+  @state() private _cloneTargetSlot: string = "";
+  @state() private _showCloneInput: boolean = false;
+  @state() private _confirmingClear: boolean = false;
 
   private _refreshTimer: number | null = null;
 
@@ -183,6 +187,68 @@ export class OmniPanelPrograms extends LitElement {
     }
     // Auto-clear feedback after a beat.
     setTimeout(() => { this._fireFeedback = null; }, 4000);
+  }
+
+  private async _clearProgram(slot: number): Promise<void> {
+    if (!this._entryId) return;
+    this._writeFeedback = "clearing…";
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "omni_pca/programs/clear",
+        entry_id: this._entryId,
+        slot,
+      });
+      this._writeFeedback = `cleared slot ${slot}`;
+      this._confirmingClear = false;
+      // Refresh the list + close the detail panel; the slot is gone.
+      this._selectedSlot = null;
+      this._detail = null;
+      await this._loadList();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this._writeFeedback = `error: ${message}`;
+    }
+    setTimeout(() => { this._writeFeedback = null; }, 4000);
+  }
+
+  private async _cloneProgram(sourceSlot: number): Promise<void> {
+    if (!this._entryId) return;
+    const targetRaw = this._cloneTargetSlot.trim();
+    const target = parseInt(targetRaw, 10);
+    if (!Number.isFinite(target) || target < 1 || target > 1500) {
+      this._writeFeedback = "target slot must be 1..1500";
+      setTimeout(() => { this._writeFeedback = null; }, 4000);
+      return;
+    }
+    if (target === sourceSlot) {
+      this._writeFeedback = "target must differ from source";
+      setTimeout(() => { this._writeFeedback = null; }, 4000);
+      return;
+    }
+    this._writeFeedback = "cloning…";
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "omni_pca/programs/clone",
+        entry_id: this._entryId,
+        source_slot: sourceSlot,
+        target_slot: target,
+      });
+      this._writeFeedback = `cloned to slot ${target}`;
+      this._showCloneInput = false;
+      this._cloneTargetSlot = "";
+      // Navigate to the new clone so the user sees the result.
+      this._selectedSlot = target;
+      await this._loadList();
+      await this._loadDetail(target);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this._writeFeedback = `error: ${message}`;
+    }
+    setTimeout(() => { this._writeFeedback = null; }, 4000);
+  }
+
+  private _onCloneTargetInput(e: Event): void {
+    this._cloneTargetSlot = (e.target as HTMLInputElement).value;
   }
 
   // -- refresh timer ----------------------------------------------------
@@ -357,9 +423,67 @@ export class OmniPanelPrograms extends LitElement {
             class="fire"
             @click=${() => this._fireProgram(d.slot)}
           >▶ Fire now</button>
+          <button
+            type="button"
+            class="secondary"
+            @click=${() => {
+              this._showCloneInput = !this._showCloneInput;
+              this._confirmingClear = false;
+            }}
+          >Clone…</button>
+          <button
+            type="button"
+            class="danger"
+            @click=${() => {
+              this._confirmingClear = !this._confirmingClear;
+              this._showCloneInput = false;
+            }}
+          >Clear</button>
           ${this._fireFeedback ? html`
             <span class="fire-feedback">${this._fireFeedback}</span>` : ""}
+          ${this._writeFeedback ? html`
+            <span class="fire-feedback">${this._writeFeedback}</span>` : ""}
         </footer>
+        ${this._showCloneInput ? html`
+          <div class="action-row">
+            <label>Clone slot ${d.slot} → target slot:
+              <input
+                type="number"
+                min="1"
+                max="1500"
+                .value=${this._cloneTargetSlot}
+                @input=${this._onCloneTargetInput}
+                @keydown=${(e: KeyboardEvent) => {
+                  if (e.key === "Enter") this._cloneProgram(d.slot);
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              class="primary"
+              @click=${() => this._cloneProgram(d.slot)}
+            >Clone</button>
+            <button
+              type="button"
+              @click=${() => { this._showCloneInput = false; }}
+            >Cancel</button>
+          </div>` : ""}
+        ${this._confirmingClear ? html`
+          <div class="action-row danger-row">
+            <span>
+              <strong>Clear slot ${d.slot}?</strong>
+              This deletes the program from the panel.
+            </span>
+            <button
+              type="button"
+              class="danger"
+              @click=${() => this._clearProgram(d.slot)}
+            >Yes, clear</button>
+            <button
+              type="button"
+              @click=${() => { this._confirmingClear = false; }}
+            >Cancel</button>
+          </div>` : ""}
         ${d.chain_slots && d.chain_slots.length > 1 ? html`
           <div class="chain-info">
             spans slots
@@ -579,16 +703,56 @@ export class OmniPanelPrograms extends LitElement {
     .detail footer {
       display: flex; align-items: center; gap: 12px; margin-top: 14px;
     }
-    .fire {
-      background: var(--primary-color, #03a9f4);
-      color: var(--text-primary-color, #fff);
+    .fire, .primary, .secondary, .danger {
       border: none;
       padding: 8px 16px;
       font-size: 0.92rem;
       border-radius: 4px;
       cursor: pointer;
+      font-family: inherit;
     }
-    .fire:hover { filter: brightness(0.9); }
+    .fire, .primary {
+      background: var(--primary-color, #03a9f4);
+      color: var(--text-primary-color, #fff);
+    }
+    .secondary {
+      background: var(--secondary-background-color, #eee);
+      color: var(--primary-text-color, #000);
+    }
+    .danger {
+      background: transparent;
+      color: var(--error-color, #db4437);
+      border: 1px solid var(--error-color, #db4437);
+    }
+    .fire:hover, .primary:hover, .secondary:hover, .danger:hover {
+      filter: brightness(0.9);
+    }
+    .action-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      padding: 10px;
+      background: var(--secondary-background-color, #f5f5f5);
+      border-radius: 4px;
+      font-size: 0.88rem;
+    }
+    .action-row.danger-row {
+      background: var(--error-color, #db4437);
+      color: white;
+    }
+    .action-row input[type="number"] {
+      width: 70px;
+      padding: 4px 6px;
+      font-size: 0.9rem;
+      border: 1px solid var(--divider-color, #ccc);
+      border-radius: 3px;
+      margin-left: 6px;
+    }
+    .action-row button {
+      padding: 4px 12px;
+      font-size: 0.85rem;
+    }
     .fire-feedback {
       font-size: 0.85rem; color: var(--secondary-text-color, #666);
     }

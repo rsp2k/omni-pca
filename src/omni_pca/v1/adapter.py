@@ -182,6 +182,13 @@ class OmniClientV1Adapter:
         """
         return self._client.iter_programs()
 
+    async def download_program(self, slot: int, program) -> None:
+        """v1 forwarder — raises NotImplementedError. See client.py."""
+        await self._client.download_program(slot, program)
+
+    async def clear_program(self, slot: int) -> None:
+        await self._client.clear_program(slot)
+
     # ---- properties synthesis ------------------------------------------
 
     async def get_object_properties(

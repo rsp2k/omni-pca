@@ -646,6 +646,53 @@ class OmniClient:
             slot = (reply.payload[0] << 8) | reply.payload[1]
             yield Program.from_wire_bytes(reply.payload[2 : 2 + 14], slot=slot)
 
+    async def download_program(self, slot: int, program: "Program") -> None:
+        """Write ``program`` into the panel at the given 1-based ``slot``.
+
+        Wire opcode: 8 (DownloadProgram) per clsOLMsg2DownloadProgram
+        (clsHAC.cs:1133-1140). Payload is the same 2-byte BE slot
+        number + 14-byte wire body the UploadProgram reply uses, so
+        ``Program.encode_wire_bytes`` produces the right thing.
+
+        The panel responds with ``Ack`` on success; we raise
+        :class:`CommandFailedError` on ``Nak`` and
+        :class:`OmniConnectionError` for any other opcode.
+
+        Writing an all-zero body clears the slot (treats the slot as
+        ``ProgramType.FREE``) — matches the panel's behaviour for an
+        empty record.
+        """
+        if not 1 <= slot <= 1500:
+            raise ValueError(f"program slot {slot} out of range 1..1500")
+        body = program.encode_wire_bytes()
+        if len(body) != 14:
+            raise ValueError(
+                f"encoded program body must be 14 bytes, got {len(body)}"
+            )
+        payload = bytes([(slot >> 8) & 0xFF, slot & 0xFF]) + body
+        reply = await self._conn.request(
+            OmniLink2MessageType.DownloadProgram, payload
+        )
+        if reply.opcode == int(OmniLink2MessageType.Nak):
+            raise CommandFailedError(
+                f"panel NAK'd DownloadProgram for slot {slot}"
+            )
+        if reply.opcode != int(OmniLink2MessageType.Ack):
+            raise OmniConnectionError(
+                f"unexpected opcode {reply.opcode} after DownloadProgram "
+                f"(expected {int(OmniLink2MessageType.Ack)})"
+            )
+
+    async def clear_program(self, slot: int) -> None:
+        """Convenience: clear a program slot by writing an all-zero body.
+
+        On the panel this marks the slot as :class:`ProgramType.FREE`,
+        same as ``DownloadProgram(slot, all-zero)``.
+        """
+        from .programs import Program, ProgramType
+        empty = Program(slot=slot, prog_type=int(ProgramType.FREE))
+        await self.download_program(slot, empty)
+
     # ---- helpers (status) -----------------------------------------------
 
     async def _fetch_status_range(

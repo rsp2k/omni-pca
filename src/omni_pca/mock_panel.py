@@ -849,7 +849,31 @@ class MockPanel:
             return _build_ack(), ()
         if opcode == OmniLink2MessageType.UploadProgram:
             return self._reply_program_data(payload), ()
+        if opcode == OmniLink2MessageType.DownloadProgram:
+            return self._handle_download_program(payload), ()
         return _build_nak(opcode), ()
+
+    def _handle_download_program(self, payload: bytes) -> Message:
+        """Write the 14-byte program body at ``payload[2:16]`` to slot
+        ``payload[0..1]`` (BE u16). Acks on success, NAKs on bad shape.
+
+        Mirrors :meth:`_reply_program_data` in reverse — same wire
+        framing as the UploadProgram reply, just inbound. Writing an
+        all-zero body removes the slot from ``state.programs`` so
+        subsequent UploadProgram requests treat it as undefined
+        (matches real-panel behaviour for cleared slots).
+        """
+        if len(payload) < 2 + 14:
+            return _build_nak(OmniLink2MessageType.DownloadProgram)
+        number = (payload[0] << 8) | payload[1]
+        if not 1 <= number <= 1500:
+            return _build_nak(OmniLink2MessageType.DownloadProgram)
+        body = bytes(payload[2 : 2 + 14])
+        if body == b"\x00" * 14:
+            self.state.programs.pop(number, None)
+        else:
+            self.state.programs[number] = body
+        return _build_ack()
 
     def _reply_program_data(self, payload: bytes) -> Message:
         """v2 program read — single-slot OR iterator.

@@ -383,6 +383,128 @@ async def _ws_get_program(
 
 @websocket_api.websocket_command(
     {
+        vol.Required("type"): "omni_pca/programs/clear",
+        vol.Required("entry_id"): str,
+        vol.Required("slot"): vol.All(int, vol.Range(min=1, max=1500)),
+    }
+)
+@websocket_api.async_response
+async def _ws_clear_program(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Erase a program slot by writing an all-zero 14-byte body.
+
+    Equivalent to "delete this program". v1 panels report
+    ``not_supported`` because their wire protocol only allows bulk
+    rewrites (which would clear everything).
+    """
+    coordinator = _coordinator_for_entry(hass, msg["entry_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "panel not configured")
+        return
+    try:
+        client = coordinator.client
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "not_connected", str(err))
+        return
+    try:
+        await client.clear_program(msg["slot"])
+    except NotImplementedError as err:
+        connection.send_error(msg["id"], "not_supported", str(err))
+        return
+    except Exception as err:
+        connection.send_error(msg["id"], "clear_failed", str(err))
+        return
+    # Drop the entry from the coordinator's in-memory view so subsequent
+    # ``list`` calls reflect the deletion before the next poll catches up.
+    if coordinator.data is not None:
+        coordinator.data.programs.pop(msg["slot"], None)
+    connection.send_result(msg["id"], {"slot": msg["slot"], "cleared": True})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "omni_pca/programs/clone",
+        vol.Required("entry_id"): str,
+        vol.Required("source_slot"): vol.All(int, vol.Range(min=1, max=1500)),
+        vol.Required("target_slot"): vol.All(int, vol.Range(min=1, max=1500)),
+    }
+)
+@websocket_api.async_response
+async def _ws_clone_program(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Copy ``source_slot``'s program into ``target_slot``.
+
+    Useful for "I want a slightly different version of this program" —
+    user clones into an empty slot, then (eventually, when the editor
+    UI lands) tweaks the fields and saves.
+
+    Refuses to clone when source and target are the same slot or when
+    the source slot is empty / not defined.
+    """
+    coordinator = _coordinator_for_entry(hass, msg["entry_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "panel not configured")
+        return
+    src = msg["source_slot"]
+    dst = msg["target_slot"]
+    if src == dst:
+        connection.send_error(
+            msg["id"], "invalid", "source and target slots must differ",
+        )
+        return
+    programs = coordinator.data.programs if coordinator.data else {}
+    source_program = programs.get(src)
+    if source_program is None or source_program.is_empty():
+        connection.send_error(
+            msg["id"], "not_found", f"no program at source slot {src}",
+        )
+        return
+    try:
+        client = coordinator.client
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "not_connected", str(err))
+        return
+    # The Program dataclass carries the slot field; re-stamp it for the
+    # destination so the on-the-wire bytes are correctly addressed.
+    from omni_pca.programs import Program  # local — avoid cycle
+    cloned = Program(
+        slot=dst,
+        prog_type=source_program.prog_type,
+        cond=source_program.cond,
+        cond2=source_program.cond2,
+        cmd=source_program.cmd,
+        par=source_program.par,
+        pr2=source_program.pr2,
+        month=source_program.month,
+        day=source_program.day,
+        days=source_program.days,
+        hour=source_program.hour,
+        minute=source_program.minute,
+        remark_id=source_program.remark_id,
+    )
+    try:
+        await client.download_program(dst, cloned)
+    except NotImplementedError as err:
+        connection.send_error(msg["id"], "not_supported", str(err))
+        return
+    except Exception as err:
+        connection.send_error(msg["id"], "clone_failed", str(err))
+        return
+    if coordinator.data is not None:
+        coordinator.data.programs[dst] = cloned
+    connection.send_result(
+        msg["id"], {"source_slot": src, "target_slot": dst, "cloned": True},
+    )
+
+
+@websocket_api.websocket_command(
+    {
         vol.Required("type"): "omni_pca/programs/fire",
         vol.Required("entry_id"): str,
         vol.Required("slot"): vol.All(int, vol.Range(min=1, max=1500)),
@@ -433,6 +555,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_list_programs)
     websocket_api.async_register_command(hass, _ws_get_program)
     websocket_api.async_register_command(hass, _ws_fire_program)
+    websocket_api.async_register_command(hass, _ws_clear_program)
+    websocket_api.async_register_command(hass, _ws_clone_program)
 
 
 # --------------------------------------------------------------------------

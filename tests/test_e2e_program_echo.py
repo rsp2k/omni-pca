@@ -511,6 +511,131 @@ async def test_mockstate_from_pca_serves_real_panel_programs() -> None:
         assert p.prog_type in {1, 2, 3}  # TIMED / EVENT / YEARLY from this fixture
 
 
+# ---- DownloadProgram writeback ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_v2_download_program_writes_slot() -> None:
+    """Writing a Program via DownloadProgram lands it in MockState; a
+    subsequent UploadProgram returns the same bytes — proving the
+    full read-then-write-then-read loop works against the mock."""
+    from omni_pca.client import OmniClient
+    from omni_pca.commands import Command
+
+    target = Program(
+        slot=42, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=7,
+        hour=22, minute=30,
+        days=int(Days.MONDAY | Days.WEDNESDAY | Days.FRIDAY),
+    )
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=MockState())
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0,
+        ) as c:
+            # Slot 42 starts empty.
+            assert 42 not in panel.state.programs
+            await c.download_program(42, target)
+            # Now the mock's state should carry the wire bytes.
+            assert 42 in panel.state.programs
+            assert panel.state.programs[42] == target.encode_wire_bytes()
+            # And a read-back via iter_programs should yield the same program.
+            programs = [p async for p in c.iter_programs()]
+    assert len(programs) == 1
+    p = programs[0]
+    assert p.slot == 42
+    assert p.prog_type == int(ProgramType.TIMED)
+    assert p.cmd == int(Command.UNIT_ON)
+    assert p.pr2 == 7
+    assert p.hour == 22 and p.minute == 30
+    assert p.days == int(Days.MONDAY | Days.WEDNESDAY | Days.FRIDAY)
+
+
+@pytest.mark.asyncio
+async def test_v2_download_program_overwrites_existing_slot() -> None:
+    """Writing to a slot that already has a program replaces it."""
+    from omni_pca.client import OmniClient
+    from omni_pca.commands import Command
+
+    original = Program(
+        slot=10, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_OFF), pr2=1,
+        hour=6, minute=0, days=int(Days.MONDAY),
+    )
+    replacement = Program(
+        slot=10, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=99,
+        hour=22, minute=0, days=int(Days.SUNDAY),
+    )
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(programs={10: original.encode_wire_bytes()}),
+    )
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0,
+        ) as c:
+            await c.download_program(10, replacement)
+    assert panel.state.programs[10] == replacement.encode_wire_bytes()
+
+
+@pytest.mark.asyncio
+async def test_v2_clear_program_removes_slot() -> None:
+    """``clear_program`` writes an all-zero body, which the mock treats
+    as deletion — subsequent reads see the slot as undefined."""
+    from omni_pca.client import OmniClient
+    from omni_pca.commands import Command
+
+    seed = Program(
+        slot=5, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=1,
+        hour=6, minute=0, days=int(Days.MONDAY),
+    )
+    panel = MockPanel(
+        controller_key=CONTROLLER_KEY,
+        state=MockState(programs={5: seed.encode_wire_bytes()}),
+    )
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0,
+        ) as c:
+            await c.clear_program(5)
+    assert 5 not in panel.state.programs
+
+
+@pytest.mark.asyncio
+async def test_v2_download_program_rejects_out_of_range_slot() -> None:
+    """Client-side range check catches bad slot before sending."""
+    from omni_pca.client import OmniClient
+
+    p = Program(slot=1, prog_type=int(ProgramType.TIMED))
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=MockState())
+    async with panel.serve(transport="tcp") as (host, port):
+        async with OmniClient(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0,
+        ) as c:
+            with pytest.raises(ValueError, match="out of range"):
+                await c.download_program(0, p)
+            with pytest.raises(ValueError, match="out of range"):
+                await c.download_program(1501, p)
+
+
+@pytest.mark.asyncio
+async def test_v1_download_program_raises_not_implemented() -> None:
+    """v1 has no single-slot write; the client raises a structured
+    NotImplementedError so HA can surface the limitation."""
+    from omni_pca.v1 import OmniClientV1
+
+    p = Program(slot=1, prog_type=int(ProgramType.TIMED))
+    panel = MockPanel(controller_key=CONTROLLER_KEY, state=MockState())
+    async with panel.serve(transport="udp") as (host, port):
+        async with OmniClientV1(
+            host=host, port=port, controller_key=CONTROLLER_KEY, timeout=2.0,
+        ) as c:
+            with pytest.raises(NotImplementedError, match="v1 panels"):
+                await c.download_program(1, p)
+
+
 @pytest.mark.asyncio
 async def test_v1_client_iter_programs_enumerates_all_seeded() -> None:
     seeded = {

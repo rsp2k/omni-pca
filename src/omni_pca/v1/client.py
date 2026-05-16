@@ -241,6 +241,28 @@ class OmniClientV1:
             slot = (reply.payload[0] << 8) | reply.payload[1]
             yield Program.from_wire_bytes(reply.payload[2 : 2 + 14], slot=slot)
 
+    async def download_program(self, slot: int, program) -> None:
+        """v1 does not expose a single-slot DownloadProgram opcode.
+
+        On v1 the only way to change programs is the bulk
+        ``DownloadPrograms`` flow (clsHAC.cs:171, clsOLMsgDownloadPrograms),
+        which clears the panel's entire program table and re-streams
+        every record. That's destructive for HA's "edit one program"
+        use case, so we surface a structured error instead of silently
+        falling back. Use a v2-capable panel for editing.
+        """
+        raise NotImplementedError(
+            "v1 panels don't support single-slot program writes; "
+            "the DownloadPrograms flow clears all programs before "
+            "rewriting. Use a TCP-mode (v2) connection for editing."
+        )
+
+    async def clear_program(self, slot: int) -> None:
+        raise NotImplementedError(
+            "v1 panels don't support single-slot program clears; "
+            "see download_program for details."
+        )
+
     # ---- write methods (Command + ExecuteSecurityCommand) ----------------
     #
     # The Command and ExecuteSecurityCommand payloads are byte-identical

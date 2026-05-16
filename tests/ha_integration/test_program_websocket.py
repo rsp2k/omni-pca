@@ -241,6 +241,90 @@ async def test_ws_fire_program_executes_command(
     assert response["result"] == {"slot": 42, "fired": True}
 
 
+async def test_ws_clear_program_writes_zero_body(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Clear erases a slot end-to-end: ws command → DownloadProgram on
+    the wire → mock state loses the slot → coordinator drops it from
+    its in-memory map."""
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    assert 42 in coordinator.data.programs
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/clear",
+        "entry_id": configured_panel.entry_id,
+        "slot": 42,
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    assert response["result"] == {"slot": 42, "cleared": True}
+    # The coordinator's view drops the slot immediately so a follow-up
+    # list reflects the deletion without waiting for the next poll.
+    assert 42 not in coordinator.data.programs
+
+
+async def test_ws_clone_program_copies_to_empty_slot(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Cloning slot 12 to slot 500 lands a copy at the target with the
+    right fields and leaves the source untouched."""
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    assert 12 in coordinator.data.programs
+    assert 500 not in coordinator.data.programs
+    source = coordinator.data.programs[12]
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/clone",
+        "entry_id": configured_panel.entry_id,
+        "source_slot": 12,
+        "target_slot": 500,
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    assert response["result"] == {
+        "source_slot": 12, "target_slot": 500, "cloned": True,
+    }
+    # New program landed at the target with re-stamped slot.
+    cloned = coordinator.data.programs[500]
+    assert cloned.slot == 500
+    assert cloned.prog_type == source.prog_type
+    assert cloned.cmd == source.cmd
+    assert cloned.pr2 == source.pr2
+    # Source remains.
+    assert 12 in coordinator.data.programs
+
+
+async def test_ws_clone_program_rejects_same_slot(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/clone",
+        "entry_id": configured_panel.entry_id,
+        "source_slot": 12,
+        "target_slot": 12,
+    })
+    response = await client.receive_json()
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid"
+
+
+async def test_ws_clone_program_rejects_missing_source(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Cloning from a slot that has no program is a structured error."""
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/clone",
+        "entry_id": configured_panel.entry_id,
+        "source_slot": 999,  # not seeded
+        "target_slot": 100,
+    })
+    response = await client.receive_json()
+    assert response["success"] is False
+    assert response["error"]["code"] == "not_found"
+
+
 async def test_ws_list_programs_live_state_overlay_zone(
     hass: HomeAssistant, configured_panel, hass_ws_client
 ) -> None:
