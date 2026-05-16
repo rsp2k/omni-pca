@@ -47,6 +47,9 @@ export interface ProgramDetail {
   references: string[];
   /** For chain detail: every slot the chain spans. */
   chain_slots?: number[];
+  /** Raw Program field values; included for compact-form programs so
+   *  the editor can seed its form from real data rather than defaults. */
+  fields?: ProgramFields;
 }
 
 export interface ProgramListRequest {
@@ -155,6 +158,127 @@ export const PROGRAM_TYPE_TIMED = 1;
 export const PROGRAM_TYPE_EVENT = 2;
 export const PROGRAM_TYPE_YEARLY = 3;
 export const PROGRAM_TYPE_REMARK = 4;
+
+
+// --------------------------------------------------------------------------
+// Event-ID encode/decode for the EVENT-program editor.
+//
+// Mirrors the Python helpers in omni_pca.program_engine — the 16-bit
+// event_id uses different bit patterns per category. Each "category"
+// in the UI maps to a different chunk of the ID space.
+// --------------------------------------------------------------------------
+
+
+export type EventCategory =
+  | "button"   // USER_MACRO_BUTTON   (evt & 0xFF00) == 0x0000
+  | "zone"     // ZONE_STATE_CHANGE   (evt & 0xFC00) == 0x0400
+  | "unit"     // UNIT_STATE_CHANGE   (evt & 0xFC00) == 0x0800
+  | "fixed"    // hard-coded IDs (phone / AC power)
+  | "raw";     // anything else — show numeric
+
+export interface DecodedEvent {
+  category: EventCategory;
+  /** For "button": 1..255 */
+  button?: number;
+  /** For "zone": 1..256, plus state 0=secure / 1=not-ready / 2=trouble / 3=tamper */
+  zone?: number;
+  zoneState?: number;
+  /** For "unit": 1..511 plus on bool */
+  unit?: number;
+  unitOn?: boolean;
+  /** For "fixed": the literal event ID. */
+  fixedId?: number;
+  /** For "raw": the literal event ID we couldn't classify. */
+  raw?: number;
+}
+
+// Hand-rolled fixed IDs and labels (matches Python EVENT_* constants).
+export const FIXED_EVENTS: ReadonlyArray<{ id: number; label: string }> = [
+  { id: 768, label: "Phone line dead" },
+  { id: 769, label: "Phone ringing" },
+  { id: 770, label: "Phone off hook" },
+  { id: 771, label: "Phone on hook" },
+  { id: 772, label: "AC power lost" },
+  { id: 773, label: "AC power restored" },
+];
+
+const ZONE_STATE_LABELS = ["secure", "not ready", "trouble", "tamper"];
+
+export function decodeEventId(eventId: number): DecodedEvent {
+  // FIXED first — the bit patterns below would otherwise collapse
+  // 768..773 into the "zone state change" category since their top
+  // bits look the same.
+  if (FIXED_EVENTS.some((f) => f.id === eventId)) {
+    return { category: "fixed", fixedId: eventId };
+  }
+  if ((eventId & 0xFF00) === 0x0000) {
+    return { category: "button", button: eventId & 0xFF };
+  }
+  if ((eventId & 0xFC00) === 0x0400) {
+    const zs = eventId & 0x03FF;
+    return {
+      category: "zone",
+      zone: Math.floor(zs / 4) + 1,
+      zoneState: zs % 4,
+    };
+  }
+  if ((eventId & 0xFC00) === 0x0800) {
+    const us = eventId & 0x03FF;
+    return {
+      category: "unit",
+      unit: Math.floor(us / 2) + 1,
+      unitOn: (us & 1) === 1,
+    };
+  }
+  return { category: "raw", raw: eventId };
+}
+
+export function encodeEventId(ev: DecodedEvent): number {
+  switch (ev.category) {
+    case "button":
+      return (ev.button ?? 1) & 0xFF;
+    case "zone": {
+      const zone = (ev.zone ?? 1) - 1;
+      const state = (ev.zoneState ?? 0) & 0x03;
+      return 0x0400 | ((zone * 4 + state) & 0x03FF);
+    }
+    case "unit": {
+      const unit = (ev.unit ?? 1) - 1;
+      const on = ev.unitOn ? 1 : 0;
+      return 0x0800 | ((unit * 2 + on) & 0x03FF);
+    }
+    case "fixed":
+      return ev.fixedId ?? 768;
+    case "raw":
+    default:
+      return ev.raw ?? 0;
+  }
+}
+
+export function eventIdFromFields(fields: ProgramFields): number {
+  return ((fields.month ?? 0) << 8) | (fields.day ?? 0);
+}
+
+export function packEventIdIntoFields(
+  fields: ProgramFields, eventId: number,
+): ProgramFields {
+  return {
+    ...fields,
+    month: (eventId >> 8) & 0xFF,
+    day: eventId & 0xFF,
+  };
+}
+
+export function zoneStateLabel(state: number): string {
+  return ZONE_STATE_LABELS[state] ?? `state ${state}`;
+}
+
+
+// Month abbreviations for the YEARLY editor.
+export const MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 /** HA's hass object — minimal surface we use. */
 export interface Hass {

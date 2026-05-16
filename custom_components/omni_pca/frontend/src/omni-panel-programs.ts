@@ -15,16 +15,32 @@ import {
   COMMAND_OPTIONS,
   CommandOption,
   DAY_BITS,
+  DecodedEvent,
+  EventCategory,
+  FIXED_EVENTS,
   Hass,
+  MONTH_NAMES,
   NamedObject,
   ObjectListResponse,
+  PROGRAM_TYPE_EVENT,
   PROGRAM_TYPE_TIMED,
+  PROGRAM_TYPE_YEARLY,
   ProgramDetail,
   ProgramFields,
   ProgramListResponse,
   ProgramRow,
   commandOptionFor,
+  decodeEventId,
+  encodeEventId,
+  eventIdFromFields,
+  packEventIdIntoFields,
 } from "./types.js";
+
+// Which compact-form trigger types the editor knows how to render.
+// REMARK is intentionally excluded (it's a text annotation, not a
+// runnable program). Clausal types (WHEN/AT/EVERY) are kind="chain"
+// not "compact" so they're filtered out earlier in _beginEdit.
+const EDITABLE_PROG_TYPES = new Set(["TIMED", "EVENT", "YEARLY"]);
 
 const TRIGGER_TYPES = [
   "TIMED", "EVENT", "YEARLY", "WHEN", "AT", "EVERY", "REMARK",
@@ -284,58 +300,55 @@ export class OmniPanelPrograms extends LitElement {
 
   private async _beginEdit(): Promise<void> {
     if (!this._detail || this._detail.kind !== "compact") return;
-    // Only TIMED programs are editable in this pass; the others render
-    // a "not yet editable" banner instead.
-    if (this._detail.trigger_type !== "TIMED") return;
+    // The frontend supports editing compact-form TIMED / EVENT / YEARLY
+    // programs. Other compact types (REMARK) and clausal chains remain
+    // read-only — the editor pathway returns early without seeding a
+    // draft so the read-only view stays visible.
+    if (!EDITABLE_PROG_TYPES.has(this._detail.trigger_type)) return;
     await this._ensureObjectsLoaded();
-    // Seed the draft from the currently-loaded compact-form Program.
-    // The detail response doesn't include raw fields, so query the
-    // coordinator-cached program by re-fetching via list (which gives
-    // us trigger_type) plus a follow-up "get" for full tokens. The
-    // simplest path: read the underlying Program off the most-recent
-    // list row's metadata. References-only data is not enough — we
-    // need raw cmd/par/pr2/days/etc. Reach for it via a fresh ws call.
     if (!this._entryId) return;
-    const programDict = await this._fetchProgramFields(
-      this._entryId, this._detail.slot,
+    // The detail response now carries raw fields directly. If they're
+    // missing (panel returned only tokens) we fall back to sensible
+    // defaults so the form at least opens — better than a hard error.
+    const fields = this._detail.fields ?? this._defaultFieldsForType(
+      this._detail.trigger_type,
     );
-    if (programDict === null) return;
-    this._editingDraft = programDict;
-    this._stopRefreshTimer();   // pause polling while editing
+    if (fields === null) return;
+    this._editingDraft = { ...fields };
+    this._stopRefreshTimer();
   }
 
-  private async _fetchProgramFields(
-    entryId: string, slot: number,
-  ): Promise<ProgramFields | null> {
-    // The list command returns rendered summaries; we need the raw
-    // Program fields to seed the form. The websocket layer doesn't
-    // currently expose raw fields, so we use a brief inline hack:
-    // re-fetch the list filtered to this exact slot via the references
-    // dimension, then read the underlying ProgramRow. But ProgramRow
-    // only carries trigger_type and counts, not raw bytes...
-    //
-    // Simplest path: add a brief endpoint or include raw fields in
-    // the get detail response. The wire side already has the bytes;
-    // we just need to send them. Doing this inline by piggy-backing
-    // on the list row would require a server change. For now, render
-    // a fresh form from sensible defaults (hour 6, minute 0,
-    // weekdays, UNIT_ON, pr2=first unit) and let the user adjust —
-    // this works for the new-program-via-clone flow.
-    //
-    // TODO: extend get-detail to include raw program fields so the
-    // editor seeds from real values when editing existing programs.
-    void entryId; void slot;
+  private _defaultFieldsForType(triggerType: string): ProgramFields | null {
     const firstUnit = this._objects?.units?.[0]?.index ?? 1;
-    return {
-      prog_type: PROGRAM_TYPE_TIMED,
-      cmd: 1,             // UNIT_ON
-      par: 0,
-      pr2: firstUnit,
-      hour: 6, minute: 0,
-      days: 0x02 | 0x04 | 0x08 | 0x10 | 0x20,  // Mon-Fri default
-      cond: 0, cond2: 0,
-      month: 0, day: 0,
-    };
+    if (triggerType === "TIMED") {
+      return {
+        prog_type: PROGRAM_TYPE_TIMED,
+        cmd: 1, par: 0, pr2: firstUnit,
+        hour: 6, minute: 0,
+        days: 0x02 | 0x04 | 0x08 | 0x10 | 0x20,  // Mon-Fri
+        cond: 0, cond2: 0, month: 0, day: 0,
+      };
+    }
+    if (triggerType === "EVENT") {
+      const firstButton = this._objects?.buttons?.[0]?.index ?? 1;
+      return {
+        prog_type: PROGRAM_TYPE_EVENT,
+        cmd: 1, par: 0, pr2: firstUnit,
+        // Default to a button-press event; month+day pack the event_id.
+        month: 0, day: firstButton & 0xFF,
+        hour: 0, minute: 0, days: 0,
+        cond: 0, cond2: 0,
+      };
+    }
+    if (triggerType === "YEARLY") {
+      return {
+        prog_type: PROGRAM_TYPE_YEARLY,
+        cmd: 1, par: 0, pr2: firstUnit,
+        month: 1, day: 1, hour: 0, minute: 0,
+        days: 0, cond: 0, cond2: 0,
+      };
+    }
+    return null;
   }
 
   private async _saveDraft(): Promise<void> {
@@ -432,6 +445,116 @@ export class OmniPanelPrograms extends LitElement {
     const value = parseInt((e.target as HTMLInputElement).value, 10);
     if (Number.isFinite(value) && value >= 0 && value <= 255) {
       this._patchDraft({ par: value });
+    }
+  }
+
+  // ---- YEARLY handlers (month / day) ---------------------------------
+
+  private _onMonthChange(e: Event): void {
+    const value = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (Number.isFinite(value) && value >= 1 && value <= 12) {
+      this._patchDraft({ month: value });
+    }
+  }
+
+  private _onDayChange(e: Event): void {
+    const value = parseInt((e.target as HTMLInputElement).value, 10);
+    if (Number.isFinite(value) && value >= 1 && value <= 31) {
+      this._patchDraft({ day: value });
+    }
+  }
+
+  // ---- EVENT handlers (event-id builder) -----------------------------
+  //
+  // The event_id is packed into the program's month/day bytes
+  // (eventId >> 8 = month, eventId & 0xFF = day) — that's the wire
+  // encoding for EVENT records. The UI works in terms of "category +
+  // sub-fields" and re-encodes on every change.
+
+  private _patchEvent(decoded: DecodedEvent): void {
+    if (!this._editingDraft) return;
+    const eventId = encodeEventId(decoded);
+    this._editingDraft = packEventIdIntoFields(this._editingDraft, eventId);
+  }
+
+  private _onEventCategoryChange(e: Event): void {
+    const cat = (e.target as HTMLSelectElement).value as EventCategory;
+    // Switching category — seed sensible defaults for the new category
+    // so the sub-fields below have valid initial values.
+    if (cat === "button") {
+      const firstButton = this._objects?.buttons?.[0]?.index ?? 1;
+      this._patchEvent({ category: "button", button: firstButton });
+    } else if (cat === "zone") {
+      const firstZone = this._objects?.zones?.[0]?.index ?? 1;
+      this._patchEvent({ category: "zone", zone: firstZone, zoneState: 1 });
+    } else if (cat === "unit") {
+      const firstUnit = this._objects?.units?.[0]?.index ?? 1;
+      this._patchEvent({ category: "unit", unit: firstUnit, unitOn: true });
+    } else if (cat === "fixed") {
+      this._patchEvent({ category: "fixed", fixedId: 772 });  // AC lost
+    }
+    // "raw" isn't user-selectable from the dropdown — only appears when
+    // an existing event ID doesn't match a known pattern.
+  }
+
+  private _onEventButtonChange(e: Event): void {
+    const button = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (Number.isFinite(button)) {
+      this._patchEvent({ category: "button", button });
+    }
+  }
+
+  private _onEventZoneChange(e: Event): void {
+    if (!this._editingDraft) return;
+    const zone = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (!Number.isFinite(zone)) return;
+    const existing = decodeEventId(eventIdFromFields(this._editingDraft));
+    this._patchEvent({
+      category: "zone",
+      zone,
+      zoneState: existing.zoneState ?? 1,
+    });
+  }
+
+  private _onEventZoneStateChange(e: Event): void {
+    if (!this._editingDraft) return;
+    const state = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (!Number.isFinite(state)) return;
+    const existing = decodeEventId(eventIdFromFields(this._editingDraft));
+    this._patchEvent({
+      category: "zone",
+      zone: existing.zone ?? 1,
+      zoneState: state,
+    });
+  }
+
+  private _onEventUnitChange(e: Event): void {
+    if (!this._editingDraft) return;
+    const unit = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (!Number.isFinite(unit)) return;
+    const existing = decodeEventId(eventIdFromFields(this._editingDraft));
+    this._patchEvent({
+      category: "unit",
+      unit,
+      unitOn: existing.unitOn ?? true,
+    });
+  }
+
+  private _onEventUnitOnChange(e: Event): void {
+    if (!this._editingDraft) return;
+    const on = (e.target as HTMLSelectElement).value === "1";
+    const existing = decodeEventId(eventIdFromFields(this._editingDraft));
+    this._patchEvent({
+      category: "unit",
+      unit: existing.unit ?? 1,
+      unitOn: on,
+    });
+  }
+
+  private _onEventFixedChange(e: Event): void {
+    const id = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (Number.isFinite(id)) {
+      this._patchEvent({ category: "fixed", fixedId: id });
     }
   }
 
@@ -610,7 +733,7 @@ export class OmniPanelPrograms extends LitElement {
             class="fire"
             @click=${() => this._fireProgram(d.slot)}
           >▶ Fire now</button>
-          ${d.trigger_type === "TIMED" && d.kind === "compact" ? html`
+          ${d.kind === "compact" && EDITABLE_PROG_TYPES.has(d.trigger_type) ? html`
             <button
               type="button"
               class="secondary"
@@ -689,103 +812,27 @@ export class OmniPanelPrograms extends LitElement {
 
   private _renderEditor(d: ProgramDetail): TemplateResult {
     const draft = this._editingDraft!;
-    const cmdOpt: CommandOption | undefined = commandOptionFor(draft.cmd ?? 0);
-    const objectBucket = cmdOpt?.ref_kind ? this._pickBucket(cmdOpt.ref_kind) : null;
-    const showsLevelPercent = (draft.cmd === 9);  // UNIT_LEVEL
+    const triggerLabel = d.trigger_type;
     return html`
       <aside class="detail editor">
         <header>
           <div>
-            <span class="trigger-badge trigger-timed">EDIT • TIMED</span>
+            <span class="trigger-badge trigger-${triggerLabel.toLowerCase()}">
+              EDIT • ${triggerLabel}
+            </span>
             <span class="slot">slot #${d.slot}</span>
           </div>
           <button type="button" class="close" @click=${this._cancelEdit}>×</button>
         </header>
 
         <div class="editor-body">
-          <!-- Time of day -->
-          <fieldset>
-            <legend>Time</legend>
-            <div class="row">
-              <label>
-                Hour
-                <input
-                  type="number" min="0" max="23"
-                  .value=${String(draft.hour ?? 0)}
-                  @input=${this._onHourChange}
-                />
-              </label>
-              <span class="time-colon">:</span>
-              <label>
-                Minute
-                <input
-                  type="number" min="0" max="59" step="1"
-                  .value=${String(draft.minute ?? 0)}
-                  @input=${this._onMinuteChange}
-                />
-              </label>
-            </div>
-          </fieldset>
-
-          <!-- Days bitmask -->
-          <fieldset>
-            <legend>Days</legend>
-            <div class="days-row">
-              ${DAY_BITS.map((d) => {
-                const active = ((draft.days ?? 0) & d.bit) !== 0;
-                return html`
-                  <button
-                    type="button"
-                    class="day-toggle ${active ? "active" : ""}"
-                    @click=${() => this._toggleDayBit(d.bit)}
-                  >${d.label}</button>
-                `;
-              })}
-            </div>
-          </fieldset>
-
-          <!-- Action -->
-          <fieldset>
-            <legend>Action</legend>
-            <label class="block">
-              Command
-              <select @change=${this._onCommandChange}>
-                ${COMMAND_OPTIONS.map((c) => html`
-                  <option .value=${String(c.value)}
-                          ?selected=${c.value === draft.cmd}>
-                    ${c.label}
-                  </option>
-                `)}
-              </select>
-            </label>
-            ${cmdOpt?.ref_kind ? html`
-              <label class="block">
-                ${cmdOpt.ref_kind[0].toUpperCase() + cmdOpt.ref_kind.slice(1)}
-                <select @change=${this._onObjectChange}>
-                  ${(objectBucket ?? []).map((o) => html`
-                    <option .value=${String(o.index)}
-                            ?selected=${o.index === draft.pr2}>
-                      #${o.index} ${o.name}
-                    </option>
-                  `)}
-                </select>
-              </label>` : ""}
-            ${showsLevelPercent ? html`
-              <label class="block">
-                Level (0..100)
-                <input
-                  type="number" min="0" max="100"
-                  .value=${String(draft.par ?? 0)}
-                  @input=${this._onParChange}
-                />
-              </label>` : ""}
-          </fieldset>
-
+          ${this._renderTriggerSection(draft)}
+          ${this._renderActionSection(draft)}
           ${draft.cond || draft.cond2 ? html`
             <div class="conditions-readonly">
               <strong>Inline conditions:</strong>
-              this program has up to two inline AND-IF conditions on the
-              source record. They're preserved when saving but editing
+              this program carries up to two inline AND-IF conditions on
+              the source record. They're preserved on save but editing
               condition fields is not yet supported.
             </div>` : ""}
         </div>
@@ -801,6 +848,274 @@ export class OmniPanelPrograms extends LitElement {
             <span class="fire-feedback">${this._writeFeedback}</span>` : ""}
         </footer>
       </aside>
+    `;
+  }
+
+  private _renderTriggerSection(draft: ProgramFields): TemplateResult {
+    switch (draft.prog_type) {
+      case PROGRAM_TYPE_TIMED:
+        return this._renderTimedTrigger(draft);
+      case PROGRAM_TYPE_EVENT:
+        return this._renderEventTrigger(draft);
+      case PROGRAM_TYPE_YEARLY:
+        return this._renderYearlyTrigger(draft);
+      default:
+        return html`<div class="conditions-readonly">
+          Editing program type ${draft.prog_type} is not supported.
+        </div>`;
+    }
+  }
+
+  private _renderTimedTrigger(draft: ProgramFields): TemplateResult {
+    return html`
+      <fieldset>
+        <legend>Time</legend>
+        <div class="row">
+          <label>
+            Hour
+            <input
+              type="number" min="0" max="23"
+              .value=${String(draft.hour ?? 0)}
+              @input=${this._onHourChange}
+            />
+          </label>
+          <span class="time-colon">:</span>
+          <label>
+            Minute
+            <input
+              type="number" min="0" max="59" step="1"
+              .value=${String(draft.minute ?? 0)}
+              @input=${this._onMinuteChange}
+            />
+          </label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Days</legend>
+        <div class="days-row">
+          ${DAY_BITS.map((d) => {
+            const active = ((draft.days ?? 0) & d.bit) !== 0;
+            return html`
+              <button
+                type="button"
+                class="day-toggle ${active ? "active" : ""}"
+                @click=${() => this._toggleDayBit(d.bit)}
+              >${d.label}</button>
+            `;
+          })}
+        </div>
+      </fieldset>
+    `;
+  }
+
+  private _renderEventTrigger(draft: ProgramFields): TemplateResult {
+    const eventId = eventIdFromFields(draft);
+    const decoded = decodeEventId(eventId);
+    return html`
+      <fieldset>
+        <legend>Trigger event</legend>
+        <label class="block">
+          Category
+          <select @change=${this._onEventCategoryChange}>
+            <option value="button"
+                    ?selected=${decoded.category === "button"}>
+              Button press
+            </option>
+            <option value="zone"
+                    ?selected=${decoded.category === "zone"}>
+              Zone state change
+            </option>
+            <option value="unit"
+                    ?selected=${decoded.category === "unit"}>
+              Unit state change
+            </option>
+            <option value="fixed"
+                    ?selected=${decoded.category === "fixed"}>
+              Fixed event (phone / AC)
+            </option>
+            ${decoded.category === "raw" ? html`
+              <option value="raw" selected>
+                Raw 0x${eventId.toString(16).padStart(4, "0")}
+              </option>` : ""}
+          </select>
+        </label>
+        ${this._renderEventCategoryFields(decoded)}
+      </fieldset>
+    `;
+  }
+
+  private _renderEventCategoryFields(decoded: DecodedEvent): TemplateResult {
+    if (decoded.category === "button") {
+      return html`
+        <label class="block">
+          Button
+          <select @change=${this._onEventButtonChange}>
+            ${(this._objects?.buttons ?? []).map((b) => html`
+              <option .value=${String(b.index)}
+                      ?selected=${b.index === decoded.button}>
+                #${b.index} ${b.name}
+              </option>
+            `)}
+          </select>
+        </label>`;
+    }
+    if (decoded.category === "zone") {
+      return html`
+        <label class="block">
+          Zone
+          <select @change=${this._onEventZoneChange}>
+            ${(this._objects?.zones ?? []).map((z) => html`
+              <option .value=${String(z.index)}
+                      ?selected=${z.index === decoded.zone}>
+                #${z.index} ${z.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Becomes
+          <select @change=${this._onEventZoneStateChange}>
+            <option value="0" ?selected=${decoded.zoneState === 0}>secure</option>
+            <option value="1" ?selected=${decoded.zoneState === 1}>not ready</option>
+            <option value="2" ?selected=${decoded.zoneState === 2}>trouble</option>
+            <option value="3" ?selected=${decoded.zoneState === 3}>tamper</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.category === "unit") {
+      return html`
+        <label class="block">
+          Unit
+          <select @change=${this._onEventUnitChange}>
+            ${(this._objects?.units ?? []).map((u) => html`
+              <option .value=${String(u.index)}
+                      ?selected=${u.index === decoded.unit}>
+                #${u.index} ${u.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Turns
+          <select @change=${this._onEventUnitOnChange}>
+            <option value="1" ?selected=${decoded.unitOn === true}>ON</option>
+            <option value="0" ?selected=${decoded.unitOn === false}>OFF</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.category === "fixed") {
+      return html`
+        <label class="block">
+          Event
+          <select @change=${this._onEventFixedChange}>
+            ${FIXED_EVENTS.map((f) => html`
+              <option .value=${String(f.id)}
+                      ?selected=${f.id === decoded.fixedId}>
+                ${f.label}
+              </option>
+            `)}
+          </select>
+        </label>`;
+    }
+    // raw — render as informational; the user picked another category
+    // from the dropdown if they want to change it.
+    return html`
+      <div class="conditions-readonly">
+        Unrecognised event ID. Switch category above to redefine.
+      </div>`;
+  }
+
+  private _renderYearlyTrigger(draft: ProgramFields): TemplateResult {
+    return html`
+      <fieldset>
+        <legend>Date</legend>
+        <div class="row">
+          <label>
+            Month
+            <select @change=${this._onMonthChange}>
+              ${MONTH_NAMES.map((name, i) => html`
+                <option .value=${String(i + 1)}
+                        ?selected=${(draft.month ?? 1) === i + 1}>
+                  ${name} (${i + 1})
+                </option>
+              `)}
+            </select>
+          </label>
+          <label>
+            Day
+            <input
+              type="number" min="1" max="31"
+              .value=${String(draft.day ?? 1)}
+              @input=${this._onDayChange}
+            />
+          </label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Time of day</legend>
+        <div class="row">
+          <label>
+            Hour
+            <input
+              type="number" min="0" max="23"
+              .value=${String(draft.hour ?? 0)}
+              @input=${this._onHourChange}
+            />
+          </label>
+          <span class="time-colon">:</span>
+          <label>
+            Minute
+            <input
+              type="number" min="0" max="59"
+              .value=${String(draft.minute ?? 0)}
+              @input=${this._onMinuteChange}
+            />
+          </label>
+        </div>
+      </fieldset>
+    `;
+  }
+
+  private _renderActionSection(draft: ProgramFields): TemplateResult {
+    const cmdOpt: CommandOption | undefined = commandOptionFor(draft.cmd ?? 0);
+    const objectBucket = cmdOpt?.ref_kind ? this._pickBucket(cmdOpt.ref_kind) : null;
+    const showsLevelPercent = (draft.cmd === 9);  // UNIT_LEVEL
+    return html`
+      <fieldset>
+        <legend>Action</legend>
+        <label class="block">
+          Command
+          <select @change=${this._onCommandChange}>
+            ${COMMAND_OPTIONS.map((c) => html`
+              <option .value=${String(c.value)}
+                      ?selected=${c.value === draft.cmd}>
+                ${c.label}
+              </option>
+            `)}
+          </select>
+        </label>
+        ${cmdOpt?.ref_kind ? html`
+          <label class="block">
+            ${cmdOpt.ref_kind[0].toUpperCase() + cmdOpt.ref_kind.slice(1)}
+            <select @change=${this._onObjectChange}>
+              ${(objectBucket ?? []).map((o) => html`
+                <option .value=${String(o.index)}
+                        ?selected=${o.index === draft.pr2}>
+                  #${o.index} ${o.name}
+                </option>
+              `)}
+            </select>
+          </label>` : ""}
+        ${showsLevelPercent ? html`
+          <label class="block">
+            Level (0..100)
+            <input
+              type="number" min="0" max="100"
+              .value=${String(draft.par ?? 0)}
+              @input=${this._onParChange}
+            />
+          </label>` : ""}
+      </fieldset>
     `;
   }
 

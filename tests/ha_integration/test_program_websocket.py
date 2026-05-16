@@ -198,6 +198,45 @@ async def test_ws_get_program_returns_full_token_stream(
     assert "KITCHEN_OVER" in text
 
 
+async def test_ws_get_program_returns_raw_fields_for_editor(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """The detail response includes a 'fields' dict carrying raw Program
+    integer values, so the editor can seed forms from actual data rather
+    than defaults. Round-trip: get → fields → write back should preserve
+    every byte (idempotent under no-op edits)."""
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/get",
+        "entry_id": configured_panel.entry_id,
+        "slot": 42,
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    fields = response["result"]["fields"]
+    # Slot 42 is the seeded TIMED 22:30 Sunday → Turn ON unit 2 program.
+    assert fields["prog_type"] == 1
+    assert fields["hour"] == 22
+    assert fields["minute"] == 30
+    assert fields["days"] == int(Days.SUNDAY)
+    assert fields["cmd"] == int(Command.UNIT_ON)
+    assert fields["pr2"] == 2
+
+    # Round-trip: write those same fields back; nothing should change.
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    before = coordinator.data.programs[42]
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/write",
+        "entry_id": configured_panel.entry_id,
+        "slot": 42,
+        "program": fields,
+    })
+    write_response = await client.receive_json()
+    assert write_response["success"] is True
+    after = coordinator.data.programs[42]
+    assert before.encode_wire_bytes() == after.encode_wire_bytes()
+
+
 async def test_ws_get_program_missing_slot_returns_error(
     hass: HomeAssistant, configured_panel, hass_ws_client
 ) -> None:

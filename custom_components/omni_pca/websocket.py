@@ -378,7 +378,32 @@ async def _ws_get_program(
         "trigger_type": _classify_trigger(target),
         "tokens": _tokens_to_json(tokens),
         "references": _extract_references(tokens),
+        # Raw program fields for the editor to seed its form. The
+        # rendered token stream is for *display*; the form needs the
+        # underlying integer values to round-trip cleanly.
+        "fields": _program_to_fields(target),
     })
+
+
+def _program_to_fields(program: Program) -> dict[str, Any]:
+    """Serialise a Program for the editor form. Mirrors the field
+    layout of :func:`_PROGRAM_FIELD_SCHEMA` so a round-trip
+    fetch → edit → save is straightforward.
+    """
+    return {
+        "prog_type": program.prog_type,
+        "cond": program.cond,
+        "cond2": program.cond2,
+        "cmd": program.cmd,
+        "par": program.par,
+        "pr2": program.pr2,
+        "month": program.month,
+        "day": program.day,
+        "days": program.days,
+        "hour": program.hour,
+        "minute": program.minute,
+        "remark_id": program.remark_id,
+    }
 
 
 _PROGRAM_FIELD_SCHEMA = vol.Schema(
