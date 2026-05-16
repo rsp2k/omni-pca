@@ -2,6 +2,17 @@
 
 All notable changes to this project. Date-based versioning ([CalVer](https://calver.org/), `YYYY.M.D`); each release date corresponds to a backwards-incompatible boundary.
 
+## [2026.5.16] — 2026-05-16
+
+Program viewer side panel + writeback API + docs link fix.
+
+### Home Assistant integration
+
+- Lit/TypeScript side panel for the program viewer (Phase C): filterable list, slide-in detail panel, structured-English token rendering, REF-token click-to-filter, live-state badges (SECURE / NOT READY / ON 60% / Away / 72°F) sourced from the coordinator, "Fire now" button calling `omni_pca/programs/fire` over the websocket.
+- Program writeback: `DownloadProgram` wire path, HA write API, Clear / Clone UI in the side panel.
+- esbuild bundle committed at `custom_components/omni_pca/www/panel.js` (~34 KB minified) so end-users don't need Node.
+- `manifest.json`: `documentation` URL points at <https://hai-omni-pro-ii.warehack.ing/> (was the GitHub repo); matches the canonical docs site already referenced from `pyproject.toml`.
+
 ## [2026.5.14] — 2026-05-14
 
 HACS publishing release — brand assets and validation tooling.
@@ -109,5 +120,6 @@ First release. Working library + Home Assistant custom component, validated end-
 - **PyPI publish**: `omni-pca` not yet on PyPI; HA `manifest.json` requirements line will only resolve once it is. For now users either install the wheel manually or pip-install from a Git URL.
 - **HACS submission**: pending live-panel validation.
 
+[2026.5.16]: https://github.com/rsp2k/omni-pca/releases/tag/v2026.5.16
 [2026.5.14]: https://github.com/rsp2k/omni-pca/releases/tag/v2026.5.14
 [2026.5.10]: https://github.com/rsp2k/omni-pca/releases/tag/v2026.5.10
