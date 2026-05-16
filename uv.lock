@@ -1511,7 +1511,7 @@ wheels = [
 
 [[package]]
 name = "omni-pca"
-version = "2026.5.11"
+version = "2026.5.14"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

@@ -4,7 +4,7 @@
     "codeowners": ["@rsp2k"],
     "config_flow": true,
     "dependencies": ["http", "websocket_api"],
-    "documentation": "https://github.com/rsp2k/omni-pca",
+    "documentation": "https://hai-omni-pro-ii.warehack.ing/",
     "integration_type": "hub",
     "iot_class": "local_push",
     "issue_tracker": "https://github.com/rsp2k/omni-pca/issues",

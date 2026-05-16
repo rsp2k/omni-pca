@@ -42,3 +42,8 @@ panel_key*
 ha-config/
 dist/
 dev/.omni_key
+
+# Frontend build artifacts. node_modules is local; the bundled panel.js
+# is committed (alongside its source) so end-users don't need Node
+# installed to use the integration.
+custom_components/omni_pca/frontend/node_modules/
