@@ -441,6 +441,33 @@ export class OmniPanelPrograms extends LitElement {
     }
   }
 
+  /** Augment a bucket with a "preserve original" option if ``current``
+   * isn't represented by any entry. Real-world programs reference object
+   * indexes far past the discovered range (e.g. raw byte values from
+   * undecoded extended-output addressing on Omni Pro II — Unit 33025).
+   * Without this option the form silently coerces such values to the
+   * first known entry, which looks like the user already selected it.
+   *
+   * The synthesized entry is prepended so it's visually distinct (top
+   * of the list) and labelled to make the situation obvious.
+   */
+  private _bucketWithPreserve(
+    bucket: NamedObject[] | null,
+    kind: string,
+    current: number,
+  ): NamedObject[] {
+    const list = bucket ?? [];
+    if (current === 0) return list;            // 0 = "no object", no synth
+    if (list.some((o) => o.index === current)) return list;
+    return [
+      {
+        index: current,
+        name: `(undiscovered ${kind} ${current} — preserve original)`,
+      },
+      ...list,
+    ];
+  }
+
   private _onObjectChange(e: Event): void {
     const value = parseInt((e.target as HTMLSelectElement).value, 10);
     if (Number.isFinite(value)) this._patchDraft({ pr2: value });
@@ -965,11 +992,14 @@ export class OmniPanelPrograms extends LitElement {
 
   private _renderEventCategoryFields(decoded: DecodedEvent): TemplateResult {
     if (decoded.category === "button") {
+      const buttons = this._bucketWithPreserve(
+        this._objects?.buttons ?? null, "button", decoded.button ?? 0,
+      );
       return html`
         <label class="block">
           Button
           <select @change=${this._onEventButtonChange}>
-            ${(this._objects?.buttons ?? []).map((b) => html`
+            ${buttons.map((b) => html`
               <option .value=${String(b.index)}
                       ?selected=${b.index === decoded.button}>
                 #${b.index} ${b.name}
@@ -979,11 +1009,14 @@ export class OmniPanelPrograms extends LitElement {
         </label>`;
     }
     if (decoded.category === "zone") {
+      const zones = this._bucketWithPreserve(
+        this._objects?.zones ?? null, "zone", decoded.zone ?? 0,
+      );
       return html`
         <label class="block">
           Zone
           <select @change=${this._onEventZoneChange}>
-            ${(this._objects?.zones ?? []).map((z) => html`
+            ${zones.map((z) => html`
               <option .value=${String(z.index)}
                       ?selected=${z.index === decoded.zone}>
                 #${z.index} ${z.name}
@@ -1002,11 +1035,14 @@ export class OmniPanelPrograms extends LitElement {
         </label>`;
     }
     if (decoded.category === "unit") {
+      const units = this._bucketWithPreserve(
+        this._objects?.units ?? null, "unit", decoded.unit ?? 0,
+      );
       return html`
         <label class="block">
           Unit
           <select @change=${this._onEventUnitChange}>
-            ${(this._objects?.units ?? []).map((u) => html`
+            ${units.map((u) => html`
               <option .value=${String(u.index)}
                       ?selected=${u.index === decoded.unit}>
                 #${u.index} ${u.name}
@@ -1097,7 +1133,13 @@ export class OmniPanelPrograms extends LitElement {
 
   private _renderActionSection(draft: ProgramFields): TemplateResult {
     const cmdOpt: CommandOption | undefined = commandOptionFor(draft.cmd ?? 0);
-    const objectBucket = cmdOpt?.ref_kind ? this._pickBucket(cmdOpt.ref_kind) : null;
+    const objectBucket = cmdOpt?.ref_kind
+      ? this._bucketWithPreserve(
+          this._pickBucket(cmdOpt.ref_kind),
+          cmdOpt.ref_kind,
+          draft.pr2 ?? 0,
+        )
+      : null;
     const showsLevelPercent = (draft.cmd === 9);  // UNIT_LEVEL
     return html`
       <fieldset>
