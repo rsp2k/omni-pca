@@ -14,11 +14,14 @@ import { renderTokens } from "./token-renderer.js";
 import {
   COMMAND_OPTIONS,
   CommandOption,
+  CondFamily,
   DAY_BITS,
+  DecodedCondition,
   DecodedEvent,
   EventCategory,
   FIXED_EVENTS,
   Hass,
+  MISC_CONDITIONALS,
   MONTH_NAMES,
   NamedObject,
   ObjectListResponse,
@@ -29,8 +32,11 @@ import {
   ProgramFields,
   ProgramListResponse,
   ProgramRow,
+  SECURITY_MODE_NAMES,
   commandOptionFor,
+  decodeCondition,
   decodeEventId,
+  encodeCondition,
   encodeEventId,
   eventIdFromFields,
   packEventIdIntoFields,
@@ -874,13 +880,7 @@ export class OmniPanelPrograms extends LitElement {
         <div class="editor-body">
           ${this._renderTriggerSection(draft)}
           ${this._renderActionSection(draft)}
-          ${draft.cond || draft.cond2 ? html`
-            <div class="conditions-readonly">
-              <strong>Inline conditions:</strong>
-              this program carries up to two inline AND-IF conditions on
-              the source record. They're preserved on save but editing
-              condition fields is not yet supported.
-            </div>` : ""}
+          ${this._renderConditionsSection(draft)}
         </div>
 
         <footer>
@@ -1178,6 +1178,204 @@ export class OmniPanelPrograms extends LitElement {
           </label>` : ""}
       </fieldset>
     `;
+  }
+
+  private _renderConditionsSection(draft: ProgramFields): TemplateResult {
+    return html`
+      <fieldset>
+        <legend>Inline AND-IF conditions</legend>
+        ${this._renderConditionSlot(
+          "First condition", draft.cond ?? 0,
+          (v) => this._patchDraft({ cond: v }),
+        )}
+        ${this._renderConditionSlot(
+          "Second condition", draft.cond2 ?? 0,
+          (v) => this._patchDraft({ cond2: v }),
+        )}
+      </fieldset>
+    `;
+  }
+
+  private _renderConditionSlot(
+    label: string, raw: number, onChange: (newCond: number) => void,
+  ): TemplateResult {
+    const decoded = decodeCondition(raw);
+    const setFamily = (family: CondFamily) => {
+      // Seed sensible defaults when switching family so the sub-fields
+      // immediately encode to a non-degenerate value.
+      const firstZone = this._objects?.zones?.[0]?.index ?? 1;
+      const firstUnit = this._objects?.units?.[0]?.index ?? 1;
+      const firstArea = this._objects?.areas?.[0]?.index ?? 1;
+      let next: DecodedCondition;
+      switch (family) {
+        case "none":  next = { family: "none" }; break;
+        case "misc":  next = { family: "misc", misc: 1 }; break; // NEVER
+        case "zone":  next = { family: "zone", index: firstZone, active: false }; break;
+        case "unit":  next = { family: "unit", index: firstUnit, active: true }; break;
+        case "time":  next = { family: "time", index: 1, active: true }; break;
+        case "sec":   next = { family: "sec", index: firstArea, mode: 0 }; break;
+      }
+      onChange(encodeCondition(next));
+    };
+    return html`
+      <div class="cond-slot">
+        <label class="block cond-family-label">
+          ${label}
+          <select @change=${(e: Event) =>
+            setFamily((e.target as HTMLSelectElement).value as CondFamily)}>
+            <option value="none" ?selected=${decoded.family === "none"}>(none)</option>
+            <option value="zone" ?selected=${decoded.family === "zone"}>Zone state</option>
+            <option value="unit" ?selected=${decoded.family === "unit"}>Unit state</option>
+            <option value="sec"  ?selected=${decoded.family === "sec"}>Area in security mode</option>
+            <option value="time" ?selected=${decoded.family === "time"}>Time clock</option>
+            <option value="misc" ?selected=${decoded.family === "misc"}>Misc (light, AC power, …)</option>
+          </select>
+        </label>
+        ${this._renderConditionSubfields(decoded, onChange)}
+      </div>
+    `;
+  }
+
+  private _renderConditionSubfields(
+    decoded: DecodedCondition, onChange: (newCond: number) => void,
+  ): TemplateResult {
+    if (decoded.family === "none") return html``;
+    if (decoded.family === "zone") {
+      const zones = this._bucketWithPreserve(
+        this._objects?.zones ?? null, "zone", decoded.index ?? 0,
+      );
+      return html`
+        <label class="block">
+          Zone
+          <select @change=${(e: Event) => {
+            const idx = parseInt((e.target as HTMLSelectElement).value, 10);
+            onChange(encodeCondition({ ...decoded, index: idx }));
+          }}>
+            ${zones.map((z) => html`
+              <option .value=${String(z.index)}
+                      ?selected=${z.index === decoded.index}>
+                #${z.index} ${z.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Is
+          <select @change=${(e: Event) => {
+            const active = (e.target as HTMLSelectElement).value === "1";
+            onChange(encodeCondition({ ...decoded, active }));
+          }}>
+            <option value="0" ?selected=${!decoded.active}>secure</option>
+            <option value="1" ?selected=${decoded.active}>not ready</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.family === "unit") {
+      const units = this._bucketWithPreserve(
+        this._objects?.units ?? null, "unit", decoded.index ?? 0,
+      );
+      return html`
+        <label class="block">
+          Unit
+          <select @change=${(e: Event) => {
+            const idx = parseInt((e.target as HTMLSelectElement).value, 10);
+            onChange(encodeCondition({ ...decoded, index: idx }));
+          }}>
+            ${units.map((u) => html`
+              <option .value=${String(u.index)}
+                      ?selected=${u.index === decoded.index}>
+                #${u.index} ${u.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Is
+          <select @change=${(e: Event) => {
+            const active = (e.target as HTMLSelectElement).value === "1";
+            onChange(encodeCondition({ ...decoded, active }));
+          }}>
+            <option value="1" ?selected=${decoded.active}>ON</option>
+            <option value="0" ?selected=${!decoded.active}>OFF</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.family === "sec") {
+      const areas = this._bucketWithPreserve(
+        this._objects?.areas ?? null, "area", decoded.index ?? 0,
+      );
+      return html`
+        <label class="block">
+          Area
+          <select @change=${(e: Event) => {
+            const idx = parseInt((e.target as HTMLSelectElement).value, 10);
+            onChange(encodeCondition({ ...decoded, index: idx }));
+          }}>
+            ${areas.map((a) => html`
+              <option .value=${String(a.index)}
+                      ?selected=${a.index === decoded.index}>
+                #${a.index} ${a.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Mode
+          <select @change=${(e: Event) => {
+            const mode = parseInt((e.target as HTMLSelectElement).value, 10);
+            onChange(encodeCondition({ ...decoded, mode }));
+          }}>
+            ${SECURITY_MODE_NAMES.map((m) => html`
+              <option .value=${String(m.value)}
+                      ?selected=${m.value === decoded.mode}>
+                ${m.label}
+              </option>
+            `)}
+          </select>
+        </label>`;
+    }
+    if (decoded.family === "time") {
+      return html`
+        <label class="block">
+          Time clock # (1..3)
+          <input
+            type="number" min="1" max="3"
+            .value=${String(decoded.index ?? 1)}
+            @input=${(e: Event) => {
+              const idx = parseInt((e.target as HTMLInputElement).value, 10);
+              if (Number.isFinite(idx)) {
+                onChange(encodeCondition({ ...decoded, index: idx }));
+              }
+            }}
+          />
+        </label>
+        <label class="block">
+          Is
+          <select @change=${(e: Event) => {
+            const active = (e.target as HTMLSelectElement).value === "1";
+            onChange(encodeCondition({ ...decoded, active }));
+          }}>
+            <option value="1" ?selected=${decoded.active}>enabled</option>
+            <option value="0" ?selected=${!decoded.active}>disabled</option>
+          </select>
+        </label>`;
+    }
+    // misc
+    return html`
+      <label class="block">
+        Condition
+        <select @change=${(e: Event) => {
+          const misc = parseInt((e.target as HTMLSelectElement).value, 10);
+          onChange(encodeCondition({ family: "misc", misc }));
+        }}>
+          ${MISC_CONDITIONALS.map((m) => html`
+            <option .value=${String(m.value)}
+                    ?selected=${m.value === decoded.misc}>
+              ${m.label}
+            </option>
+          `)}
+        </select>
+      </label>`;
   }
 
   // -- styles -----------------------------------------------------------
@@ -1514,6 +1712,17 @@ export class OmniPanelPrograms extends LitElement {
       border-radius: 4px;
       font-size: 0.82rem;
       color: var(--secondary-text-color, #666);
+    }
+    .cond-slot {
+      padding: 8px 10px;
+      margin-top: 6px;
+      background: var(--secondary-background-color, #f5f5f5);
+      border-radius: 4px;
+    }
+    .cond-slot:first-of-type { margin-top: 0; }
+    .cond-family-label {
+      font-weight: 600;
+      color: var(--primary-text-color, #000);
     }
   `;
 }

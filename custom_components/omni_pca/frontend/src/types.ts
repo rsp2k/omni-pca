@@ -280,6 +280,135 @@ export const MONTH_NAMES = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+
+// --------------------------------------------------------------------------
+// Compact-form AND-IF condition encode/decode for the inline-conditions
+// editor (TIMED/EVENT/YEARLY cond + cond2 fields).
+//
+// Mirrors clsText.GetConditionalText (clsText.cs:2224-2274) and the
+// Python _emit_traditional_cond in program_renderer.py. Bit layout:
+//
+//   family = (cond >> 8) & 0xFC
+//   selector bit = (cond & 0x0200) — meaning depends on family
+//
+//   family 0x00 OTHER  — cond & 0x0F = enuMiscConditional (NONE=0,
+//                                     NEVER=1, LIGHT=2, DARK=3, ...)
+//   family 0x04 ZONE   — low 8 bits = zone index; selector bit
+//                        0=secure, 1=not ready
+//   family 0x08 CTRL   — low 9 bits = unit index; selector bit
+//                        0=OFF, 1=ON
+//   family 0x0C TIME   — low 8 bits = time-clock index; selector bit
+//                        0=disabled, 1=enabled
+//   family >= 0x10 SEC — (cond >> 8) & 0x0F = area, (cond >> 12) & 0x07 = mode
+//
+// cond == 0 means "no condition" (NONE).
+// --------------------------------------------------------------------------
+
+
+export type CondFamily =
+  | "none"   // cond = 0 — no inline condition
+  | "misc"   // OTHER family (NEVER, LIGHT, DARK, PHONE_*, AC_POWER_*, …)
+  | "zone"   // ZONE family — zone + secure/not-ready
+  | "unit"   // CTRL family — unit + on/off
+  | "time"   // TIME family — time-clock + enabled/disabled
+  | "sec";   // SEC family — area + security mode
+
+export interface DecodedCondition {
+  family: CondFamily;
+  /** misc-conditional index (0..15) — used when family == "misc". */
+  misc?: number;
+  /** Zone / unit / time-clock / area index — used by the named families. */
+  index?: number;
+  /** Selector bit: zone "not ready", unit "on", time-clock "enabled". */
+  active?: boolean;
+  /** SEC family security mode (0..7). */
+  mode?: number;
+}
+
+// MiscConditional enum (matches omni_pca.programs.MiscConditional).
+// Each entry: { value, label }. NONE renders as "always" and NEVER as
+// "never" — both common authoring patterns.
+export const MISC_CONDITIONALS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 0,  label: "always" },
+  { value: 1,  label: "never" },
+  { value: 2,  label: "it is light outside" },
+  { value: 3,  label: "it is dark outside" },
+  { value: 4,  label: "phone line is dead" },
+  { value: 5,  label: "phone is ringing" },
+  { value: 6,  label: "phone is off hook" },
+  { value: 7,  label: "phone is on hook" },
+  { value: 8,  label: "AC power is off" },
+  { value: 9,  label: "AC power is on" },
+  { value: 10, label: "battery is low" },
+  { value: 11, label: "battery is OK" },
+  { value: 12, label: "energy cost is low" },
+  { value: 13, label: "energy cost is mid" },
+  { value: 14, label: "energy cost is high" },
+  { value: 15, label: "energy cost is critical" },
+];
+
+// Security modes for the SEC family (matches enuSecurityMode order).
+export const SECURITY_MODE_NAMES: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 0, label: "Off (disarmed)" },
+  { value: 1, label: "Day" },
+  { value: 2, label: "Night" },
+  { value: 3, label: "Away" },
+  { value: 4, label: "Vacation" },
+  { value: 5, label: "Day Instant" },
+  { value: 6, label: "Night Delayed" },
+];
+
+export function decodeCondition(cond: number): DecodedCondition {
+  if (cond === 0) return { family: "none" };
+  const family = (cond >> 8) & 0xFC;
+  const active = (cond & 0x0200) !== 0;
+  if (family === 0x00) {
+    return { family: "misc", misc: cond & 0x0F };
+  }
+  if (family === 0x04) {
+    return { family: "zone", index: cond & 0xFF, active };
+  }
+  if (family === 0x08) {
+    return { family: "unit", index: cond & 0x01FF, active };
+  }
+  if (family === 0x0C) {
+    return { family: "time", index: cond & 0xFF, active };
+  }
+  // SEC family (family >= 0x10): area in high nibble of upper byte,
+  // mode in top nibble.
+  return {
+    family: "sec",
+    index: (cond >> 8) & 0x0F,
+    mode: (cond >> 12) & 0x07,
+  };
+}
+
+export function encodeCondition(c: DecodedCondition): number {
+  switch (c.family) {
+    case "none":
+      return 0;
+    case "misc":
+      return (c.misc ?? 0) & 0x0F;  // family 0x00, low nibble = misc
+    case "zone": {
+      const idx = (c.index ?? 0) & 0xFF;
+      return 0x0400 | (c.active ? 0x0200 : 0) | idx;
+    }
+    case "unit": {
+      const idx = (c.index ?? 0) & 0x01FF;
+      return 0x0800 | (c.active ? 0x0200 : 0) | idx;
+    }
+    case "time": {
+      const idx = (c.index ?? 0) & 0xFF;
+      return 0x0C00 | (c.active ? 0x0200 : 0) | idx;
+    }
+    case "sec": {
+      const area = (c.index ?? 1) & 0x0F;
+      const mode = (c.mode ?? 0) & 0x07;
+      return (mode << 12) | (area << 8);
+    }
+  }
+}
+
 /** HA's hass object — minimal surface we use. */
 export interface Hass {
   connection: {
