@@ -1849,9 +1849,9 @@ export class OmniPanelPrograms extends LitElement {
   ): TemplateResult {
     const s = decodeStructuredAnd(cond);
     if (!isEditableStructuredAnd(s)) {
-      // Out of editor scope (non-constant Arg2, unsupported Arg1 type,
-      // or non-zero compConst). Surface as preserve-only so the user
-      // can still remove the row but can't damage the encoded data.
+      // Out of editor scope (unsupported Arg1/Arg2 type or non-zero
+      // CompConst). Surface as preserve-only so the user can still
+      // remove the row but can't damage the encoded data.
       return html`
         <div class="cond-slot structured-cond">
           <div class="cond-row-header">
@@ -1862,8 +1862,8 @@ export class OmniPanelPrograms extends LitElement {
           </div>
           <div class="conditions-readonly">
             Structured comparison with a shape the editor can't drive
-            yet (Arg2 references another object, Arg1 is an unsupported
-            type, or a CompConst value is present). Preserved on save.
+            yet (Arg1 or Arg2 is an unsupported type, or a CompConst
+            value is present). Preserved on save.
           </div>
         </div>`;
     }
@@ -1881,24 +1881,24 @@ export class OmniPanelPrograms extends LitElement {
 
   /** Render the editor for one structured-AND condition. Lays out as:
    *
-   *      Arg1 type ▸ object/picker ▸ field ▸ operator ▸ Arg2 constant
+   *      Arg1 type ▸ object/picker ▸ field ▸ operator ▸
+   *      Arg2 type ▸ (constant | object/picker ▸ field)
    *
-   *  Arg2 is locked to Constant in this pass. For unary operators
-   *  (ODD / EVEN) the Arg2 input is hidden.
+   *  Both Arg1 and Arg2 support Zone / Unit / Thermostat / Area /
+   *  TimeDate references; Arg2 also supports plain Constant. For
+   *  unary operators (ODD / EVEN) the Arg2 controls are hidden.
    */
   private _renderStructuredAndForm(
     s: DecodedStructuredAnd, idx: number,
   ): TemplateResult {
     const update = (patch: Partial<DecodedStructuredAnd>) => {
       const merged = { ...s, ...patch };
-      // Force Arg2 = Constant in editor scope so nothing accidentally
-      // promotes to an object reference.
-      merged.arg2Type = 0;
-      merged.arg2Field = 0;
       this._patchChainCondition(idx, encodeStructuredAnd(merged));
     };
     const arg1Fields = FIELDS_BY_TYPE[s.arg1Type] ?? [];
     const arg1Kind = argTypeKind(s.arg1Type);
+    const arg2Fields = FIELDS_BY_TYPE[s.arg2Type] ?? [];
+    const arg2Kind = argTypeKind(s.arg2Type);
     const showArg2 = !isUnaryOp(s.op);
     return html`
       <div class="structured-row">
@@ -1906,19 +1906,10 @@ export class OmniPanelPrograms extends LitElement {
           Arg1 type
           <select @change=${(e: Event) => {
             const newType = parseInt((e.target as HTMLSelectElement).value, 10);
-            // Reset arg1Ix + field when type changes — keeps the form
-            // self-consistent and avoids stale picker values.
-            const firstField = (FIELDS_BY_TYPE[newType] ?? [{ value: 0 }])[0].value;
-            const newKind = argTypeKind(newType);
-            let newIx = 0;
-            if (newKind === "zone") newIx = this._objects?.zones?.[0]?.index ?? 1;
-            else if (newKind === "unit") newIx = this._objects?.units?.[0]?.index ?? 1;
-            else if (newKind === "thermostat") newIx = this._objects?.thermostats?.[0]?.index ?? 1;
-            else if (newKind === "area") newIx = this._objects?.areas?.[0]?.index ?? 1;
             update({
               arg1Type: newType,
-              arg1Ix: newIx,
-              arg1Field: firstField,
+              arg1Ix: this._defaultIxForKind(argTypeKind(newType)),
+              arg1Field: (FIELDS_BY_TYPE[newType] ?? [{ value: 0 }])[0].value,
             });
           }}>
             ${ARG_TYPES.filter((a) => a.value !== 0).map((a) => html`
@@ -1928,7 +1919,9 @@ export class OmniPanelPrograms extends LitElement {
           </select>
         </label>
 
-        ${arg1Kind ? this._renderStructuredArg1Picker(s, arg1Kind, update) : ""}
+        ${arg1Kind ? this._renderStructuredObjectPicker(
+          arg1Kind, s.arg1Ix, (v) => update({ arg1Ix: v }), "Arg1",
+        ) : ""}
 
         ${arg1Fields.length > 0 ? html`
           <label class="block">
@@ -1957,37 +1950,95 @@ export class OmniPanelPrograms extends LitElement {
 
         ${showArg2 ? html`
           <label class="block">
-            Compare against (constant)
-            <input type="number" min="0" max="65535"
-              .value=${String(s.arg2Ix)}
-              @input=${(e: Event) => {
-                const v = parseInt((e.target as HTMLInputElement).value, 10);
-                if (Number.isFinite(v) && v >= 0 && v <= 0xFFFF) {
-                  update({ arg2Ix: v });
-                }
-              }}
-            />
-          </label>` : ""}
+            Arg2 type
+            <select @change=${(e: Event) => {
+              const newType = parseInt((e.target as HTMLSelectElement).value, 10);
+              const newKind = argTypeKind(newType);
+              // Constant → arg2Ix is the literal value (preserve);
+              // reference type → arg2Ix is an object index (reset to
+              // first discovered or 0 for TimeDate).
+              const newIx = newType === 0
+                ? s.arg2Ix
+                : this._defaultIxForKind(newKind);
+              const newField = newType === 0
+                ? 0
+                : (FIELDS_BY_TYPE[newType] ?? [{ value: 0 }])[0].value;
+              update({
+                arg2Type: newType,
+                arg2Ix: newIx,
+                arg2Field: newField,
+              });
+            }}>
+              ${ARG_TYPES.map((a) => html`
+                <option .value=${String(a.value)} ?selected=${a.value === s.arg2Type}>
+                  ${a.label}
+                </option>`)}
+            </select>
+          </label>
+
+          ${s.arg2Type === 0 ? html`
+            <label class="block">
+              Constant
+              <input type="number" min="0" max="65535"
+                .value=${String(s.arg2Ix)}
+                @input=${(e: Event) => {
+                  const v = parseInt((e.target as HTMLInputElement).value, 10);
+                  if (Number.isFinite(v) && v >= 0 && v <= 0xFFFF) {
+                    update({ arg2Ix: v });
+                  }
+                }}
+              />
+            </label>` : ""}
+
+          ${arg2Kind ? this._renderStructuredObjectPicker(
+            arg2Kind, s.arg2Ix, (v) => update({ arg2Ix: v }), "Arg2",
+          ) : ""}
+
+          ${s.arg2Type !== 0 && arg2Fields.length > 0 ? html`
+            <label class="block">
+              Arg2 field
+              <select @change=${(e: Event) => update({
+                arg2Field: parseInt((e.target as HTMLSelectElement).value, 10),
+              })}>
+                ${arg2Fields.map((f) => html`
+                  <option .value=${String(f.value)} ?selected=${f.value === s.arg2Field}>
+                    ${f.label}
+                  </option>`)}
+              </select>
+            </label>` : ""}
+        ` : ""}
       </div>`;
   }
 
-  private _renderStructuredArg1Picker(
-    s: DecodedStructuredAnd,
+  /** First discovered object index for a given kind, falling back to 1
+   *  for reference kinds (TimeDate / null returns 0 — "no object"). */
+  private _defaultIxForKind(kind: string | null): number {
+    switch (kind) {
+      case "zone":       return this._objects?.zones?.[0]?.index ?? 1;
+      case "unit":       return this._objects?.units?.[0]?.index ?? 1;
+      case "thermostat": return this._objects?.thermostats?.[0]?.index ?? 1;
+      case "area":       return this._objects?.areas?.[0]?.index ?? 1;
+      default:           return 0;
+    }
+  }
+
+  private _renderStructuredObjectPicker(
     kind: string,
-    update: (p: Partial<DecodedStructuredAnd>) => void,
+    current: number,
+    onChange: (v: number) => void,
+    labelPrefix: string,
   ): TemplateResult {
     const bucket = this._bucketWithPreserve(
-      this._pickBucket(kind), kind, s.arg1Ix,
+      this._pickBucket(kind), kind, current,
     );
-    const label = kind[0].toUpperCase() + kind.slice(1);
+    const kindLabel = kind[0].toUpperCase() + kind.slice(1);
     return html`
       <label class="block">
-        ${label}
-        <select @change=${(e: Event) => update({
-          arg1Ix: parseInt((e.target as HTMLSelectElement).value, 10),
-        })}>
+        ${labelPrefix} ${kindLabel}
+        <select @change=${(e: Event) =>
+          onChange(parseInt((e.target as HTMLSelectElement).value, 10))}>
           ${bucket.map((o) => html`
-            <option .value=${String(o.index)} ?selected=${o.index === s.arg1Ix}>
+            <option .value=${String(o.index)} ?selected=${o.index === current}>
               #${o.index} ${o.name}
             </option>`)}
         </select>

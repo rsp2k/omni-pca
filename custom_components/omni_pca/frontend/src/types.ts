@@ -569,11 +569,11 @@ export function emptyThenRecord(firstUnit: number = 1): ProgramFields {
 //   day, days              = and_compconst    (BE u16 — extra constant, rarely used)
 //
 // Editor cuts:
-//   * Arg2 locked to Constant in this pass (other-object Arg2 stays
-//     read-only with a banner). Arg2-constant covers
-//     "TEMP > 70", "Zone.CurrentState == 1", "Hour == 22" etc.
-//   * Arg1 restricted to Zone / Unit / Thermostat / Area / TimeDate.
-//     Anything else (Aux / Audio / System / etc.) stays read-only.
+//   * Arg1 and Arg2 both restricted to Constant / Zone / Unit /
+//     Thermostat / Area / TimeDate. Anything else (Aux / Audio /
+//     System / etc.) stays read-only.
+//   * Non-zero CompConst stays read-only (rarely used; preserved on
+//     save).
 // --------------------------------------------------------------------------
 
 
@@ -708,12 +708,15 @@ export function encodeStructuredAnd(s: DecodedStructuredAnd): Partial<ProgramFie
 }
 
 /** True iff the structured AND record is in a shape the editor can
- *  fully drive. Other shapes (Arg2=non-constant object, exotic Arg1
- *  types, or non-zero compConst) stay read-only — they're preserved
- *  on save but their fields aren't exposed as form controls. */
+ *  fully drive. Arg1 must be one of the editable reference types;
+ *  Arg2 must be Constant or one of the editable reference types
+ *  (unary operators ignore Arg2 entirely). Non-zero compConst stays
+ *  read-only — preserved on save but not exposed as a form control. */
 export function isEditableStructuredAnd(s: DecodedStructuredAnd): boolean {
   if (!isEditableArg1Type(s.arg1Type)) return false;
-  if (!isUnaryOp(s.op) && s.arg2Type !== 0) return false;
+  if (!isUnaryOp(s.op) && s.arg2Type !== 0 && !isEditableArg1Type(s.arg2Type)) {
+    return false;
+  }
   if (s.compConst !== 0) return false;
   return true;
 }
