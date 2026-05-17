@@ -45,6 +45,27 @@ def seeded_programs() -> dict[int, Program]:
             # WHEN zone 1 changes to NOT_READY (event_id = 0x0401)
             month=0x04, day=0x01,
         ),
+        # A clausal chain spanning slots 200..203: WHEN zone 1 not-ready
+        # AND IF unit 1 ON THEN turn ON unit 2 AND turn OFF unit 1.
+        200: Program(
+            slot=200, prog_type=int(ProgramType.WHEN),
+            # event_id = 0x0401 (zone 1 not-ready) packed in month/day
+            month=0x04, day=0x01,
+        ),
+        201: Program(
+            slot=201, prog_type=int(ProgramType.AND),
+            # Traditional AND: family byte 0x0A = CTRL+ON, instance 1.
+            # and_family = cond & 0xFF, and_instance = (cond2>>8) & 0xFF.
+            cond=0x000A, cond2=0x0100,
+        ),
+        202: Program(
+            slot=202, prog_type=int(ProgramType.THEN),
+            cmd=int(Command.UNIT_ON), pr2=2,
+        ),
+        203: Program(
+            slot=203, prog_type=int(ProgramType.THEN),
+            cmd=int(Command.UNIT_OFF), pr2=1,
+        ),
     }
 
 
@@ -93,17 +114,14 @@ async def test_ws_list_programs_returns_summaries(
     response = await client.receive_json()
     assert response["success"] is True
     result = response["result"]
-    assert result["total"] == 3
-    assert result["filtered_total"] == 3
+    # 3 compact-form programs (12, 42, 99) + 1 clausal chain (head at
+    # slot 200, spanning 200..203). The chain renders as a single row.
+    assert result["total"] == 4
+    assert result["filtered_total"] == 4
     rows_by_slot = {row["slot"]: row for row in result["programs"]}
-    # Both TIMED programs and the EVENT program land in the response.
-    assert rows_by_slot.keys() == {12, 42, 99}
-    # Each row has the metadata the frontend needs.
-    for row in result["programs"]:
-        assert row["kind"] == "compact"
-        assert row["trigger_type"] in ("TIMED", "EVENT")
-        assert isinstance(row["summary"], list)
-        assert row["summary"]  # non-empty token list
+    assert rows_by_slot.keys() == {12, 42, 99, 200}
+    assert rows_by_slot[200]["kind"] == "chain"
+    assert rows_by_slot[12]["kind"] == "compact"
 
 
 async def test_ws_list_programs_filter_by_trigger_type(
@@ -135,8 +153,11 @@ async def test_ws_list_programs_filter_by_referenced_entity(
     })
     response = await client.receive_json()
     result = response["result"]
-    assert result["filtered_total"] == 1
-    assert result["programs"][0]["slot"] == 42
+    # Slot 42 ("Turn ON KITCHEN_OVERHEAD" = unit 2) plus the seeded chain
+    # at slot 200 (action: Turn ON unit 2) both reference unit:2.
+    assert result["filtered_total"] == 2
+    slots = {r["slot"] for r in result["programs"]}
+    assert slots == {42, 200}
 
 
 async def test_ws_list_programs_search_substring(
@@ -151,9 +172,13 @@ async def test_ws_list_programs_search_substring(
     })
     response = await client.receive_json()
     result = response["result"]
-    # Only slot 42 ("Turn ON KITCHEN_OVERHEAD") mentions kitchen.
-    assert result["filtered_total"] == 1
-    assert result["programs"][0]["slot"] == 42
+    # Slot 42 ("Turn ON KITCHEN_OVERHEAD" — truncated to 12 chars on
+    # wire = "KITCHEN_OVER") matches. The chain at slot 200 also has
+    # an action against unit 2 which renders with the same truncated
+    # name, so it matches too.
+    assert result["filtered_total"] == 2
+    slots = {r["slot"] for r in result["programs"]}
+    assert slots == {42, 200}
 
 
 async def test_ws_list_programs_pagination(
@@ -168,7 +193,8 @@ async def test_ws_list_programs_pagination(
     })
     response = await client.receive_json()
     result = response["result"]
-    assert result["filtered_total"] == 3
+    # 4 list rows total: 3 compact + 1 chain head.
+    assert result["filtered_total"] == 4
     assert len(result["programs"]) == 2
     assert [row["slot"] for row in result["programs"]] == [42, 99]
 
@@ -460,6 +486,167 @@ async def test_ws_list_objects_returns_named_buckets(
     # And zones come back with their fixture names too.
     zones_by_idx = {z["index"]: z["name"] for z in result["zones"]}
     assert zones_by_idx[1] == "FRONT_DOOR"
+
+
+async def test_ws_get_chain_returns_member_fields(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Chain detail response includes a chain_members array with each
+    member's role + raw fields, so the editor can render an editable
+    row per slot."""
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/get",
+        "entry_id": configured_panel.entry_id,
+        "slot": 200,  # head of the seeded chain
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    result = response["result"]
+    assert result["kind"] == "chain"
+    members = result["chain_members"]
+    roles = [m["role"] for m in members]
+    assert roles == ["head", "condition", "action", "action"]
+    # Head carries the event_id (zone 1 NOT_READY = 0x0401).
+    head_fields = members[0]["fields"]
+    assert head_fields["prog_type"] == int(ProgramType.WHEN)
+    assert head_fields["month"] == 0x04
+    assert head_fields["day"] == 0x01
+    # Condition is a Traditional AND record with family CTRL+ON, unit 1.
+    cond_fields = members[1]["fields"]
+    assert cond_fields["prog_type"] == int(ProgramType.AND)
+    assert cond_fields["cond"] == 0x000A
+    assert cond_fields["cond2"] == 0x0100
+
+
+async def test_ws_chain_write_replaces_in_place(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Same-length rewrite leaves the chain footprint unchanged but
+    updates every member's bytes."""
+    client = await hass_ws_client(hass)
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    # Existing chain: slots 200..203.
+    assert {200, 201, 202, 203} <= coordinator.data.programs.keys()
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/chain/write",
+        "entry_id": configured_panel.entry_id,
+        "head_slot": 200,
+        "head": {
+            "prog_type": int(ProgramType.WHEN),
+            "month": 0x04, "day": 0x02,        # zone 1 trouble (id 0x0402)
+        },
+        "conditions": [
+            # AND IF unit 2 ON (family 0x0A, instance 2)
+            {"prog_type": int(ProgramType.AND),
+             "cond": 0x000A, "cond2": 0x0200},
+        ],
+        "actions": [
+            {"prog_type": int(ProgramType.THEN),
+             "cmd": int(Command.UNIT_OFF), "pr2": 2},
+            {"prog_type": int(ProgramType.THEN),
+             "cmd": int(Command.UNIT_ON), "pr2": 1},
+        ],
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    assert response["result"]["written_slots"] == [200, 201, 202, 203]
+    assert response["result"]["cleared_slots"] == []
+    # Coordinator state reflects the new bytes.
+    assert coordinator.data.programs[200].day == 0x02
+    assert coordinator.data.programs[201].cond2 == 0x0200
+    assert coordinator.data.programs[202].cmd == int(Command.UNIT_OFF)
+
+
+async def test_ws_chain_write_shrinks_and_clears(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Shorter rewrite clears the trailing old chain slots."""
+    client = await hass_ws_client(hass)
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/chain/write",
+        "entry_id": configured_panel.entry_id,
+        "head_slot": 200,
+        "head": {
+            "prog_type": int(ProgramType.WHEN),
+            "month": 0x04, "day": 0x01,
+        },
+        # No conditions, one action — chain shrinks from 4 slots to 2.
+        "conditions": [],
+        "actions": [
+            {"prog_type": int(ProgramType.THEN),
+             "cmd": int(Command.UNIT_ON), "pr2": 1},
+        ],
+    })
+    response = await client.receive_json()
+    assert response["success"] is True
+    assert response["result"]["written_slots"] == [200, 201]
+    assert sorted(response["result"]["cleared_slots"]) == [202, 203]
+    # Cleared slots are gone from the coordinator's view.
+    assert 202 not in coordinator.data.programs
+    assert 203 not in coordinator.data.programs
+
+
+async def test_ws_chain_write_refuses_to_trample(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """Expanding a chain into a slot that already holds another program
+    is refused — protects against accidental data loss."""
+    client = await hass_ws_client(hass)
+    coordinator = hass.data[DOMAIN][configured_panel.entry_id]
+    # Seed a sentinel program at slot 204 (right after the chain) so an
+    # expand attempt collides.
+    coordinator.data.programs[204] = Program(
+        slot=204, prog_type=int(ProgramType.TIMED),
+        cmd=int(Command.UNIT_ON), pr2=1,
+        hour=12, minute=0, days=int(Days.MONDAY),
+    )
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/chain/write",
+        "entry_id": configured_panel.entry_id,
+        "head_slot": 200,
+        "head": {"prog_type": int(ProgramType.WHEN),
+                 "month": 0x04, "day": 0x01},
+        "conditions": [
+            {"prog_type": int(ProgramType.AND),
+             "cond": 0x000A, "cond2": 0x0100},
+            # Adding a second condition pushes the chain from 4 to 5
+            # slots → slot 204 collision.
+            {"prog_type": int(ProgramType.AND),
+             "cond": 0x000A, "cond2": 0x0200},
+        ],
+        "actions": [
+            {"prog_type": int(ProgramType.THEN),
+             "cmd": int(Command.UNIT_ON), "pr2": 2},
+            {"prog_type": int(ProgramType.THEN),
+             "cmd": int(Command.UNIT_OFF), "pr2": 1},
+        ],
+    })
+    response = await client.receive_json()
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid"
+    # The sentinel program is untouched.
+    assert coordinator.data.programs[204].cmd == int(Command.UNIT_ON)
+
+
+async def test_ws_chain_write_rejects_zero_actions(
+    hass: HomeAssistant, configured_panel, hass_ws_client
+) -> None:
+    """A chain with no THEN actions is meaningless — refuse it."""
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({
+        "type": "omni_pca/programs/chain/write",
+        "entry_id": configured_panel.entry_id,
+        "head_slot": 200,
+        "head": {"prog_type": int(ProgramType.WHEN),
+                 "month": 0x04, "day": 0x01},
+        "conditions": [],
+        "actions": [],
+    })
+    response = await client.receive_json()
+    assert response["success"] is False
+    assert response["error"]["code"] == "invalid"
 
 
 async def test_ws_list_programs_live_state_overlay_zone(

@@ -50,6 +50,13 @@ export interface ProgramDetail {
   /** Raw Program field values; included for compact-form programs so
    *  the editor can seed its form from real data rather than defaults. */
   fields?: ProgramFields;
+  /** For chain detail: per-member role + raw fields. Drives the
+   *  chain editor's row-per-slot rendering. */
+  chain_members?: Array<{
+    slot: number;
+    role: "head" | "condition" | "action";
+    fields: ProgramFields;
+  }>;
 }
 
 export interface ProgramListRequest {
@@ -407,6 +414,137 @@ export function encodeCondition(c: DecodedCondition): number {
       return (mode << 12) | (area << 8);
     }
   }
+}
+
+
+// --------------------------------------------------------------------------
+// Clausal chain (multi-record) editor types
+// --------------------------------------------------------------------------
+
+
+/** ProgramType values for the chain head/body/tail records. */
+export const PROGRAM_TYPE_WHEN = 5;
+export const PROGRAM_TYPE_AT = 6;
+export const PROGRAM_TYPE_EVERY = 7;
+export const PROGRAM_TYPE_AND = 8;
+export const PROGRAM_TYPE_OR = 9;
+export const PROGRAM_TYPE_THEN = 10;
+
+/** Roles assigned by the backend's chain_members payload. */
+export type ChainMemberRole = "head" | "condition" | "action";
+
+export interface ChainMember {
+  slot: number;
+  role: ChainMemberRole;
+  fields: ProgramFields;
+}
+
+/** Decoded view of a Traditional AND/OR record's condition.
+ *
+ * AND records use the SAME family encoding as compact-form cond, but
+ * the bytes land in different ProgramFields slots:
+ *
+ *   family   = fields.cond & 0xFF              (disk byte 1)
+ *   instance = (fields.cond2 >> 8) & 0xFF      (disk byte 3)
+ *
+ * The selector bit (`0x0200`) doesn't apply to AND records the same
+ * way — instead the family byte's bit 1 (0x02) carries the
+ * secure/not-ready or off/on selector. For example:
+ *   0x04 = ZONE secure         0x06 = ZONE not-ready
+ *   0x08 = CTRL off            0x0A = CTRL on
+ *   0x0C = TIME disabled       0x0E = TIME enabled
+ */
+export function decodeAndCondition(fields: ProgramFields): DecodedCondition {
+  const family = (fields.cond ?? 0) & 0xFF;
+  const instance = ((fields.cond2 ?? 0) >> 8) & 0xFF;
+  const familyMajor = family & 0xFC;
+  const selector = (family & 0x02) !== 0;
+  if (family === 0 && instance === 0) return { family: "none" };
+  if (familyMajor === 0x00) return { family: "misc", misc: family & 0x0F };
+  if (familyMajor === 0x04) return { family: "zone", index: instance, active: selector };
+  if (familyMajor === 0x08) return { family: "unit", index: instance, active: selector };
+  if (familyMajor === 0x0C) return { family: "time", index: instance, active: selector };
+  // SEC: high nibble of family = mode, low nibble = area.
+  return {
+    family: "sec",
+    index: family & 0x0F,
+    mode: (family >> 4) & 0x07,
+  };
+}
+
+/** Re-encode a DecodedCondition into the cond/cond2 fields of an
+ *  AND/OR record. Returns a partial ProgramFields with cond + cond2
+ *  set; the caller should merge with the rest of the record (cmd/par/
+ *  etc. stay zero for Traditional AND records).
+ */
+export function encodeAndCondition(c: DecodedCondition): {
+  cond: number; cond2: number;
+} {
+  switch (c.family) {
+    case "none":
+      return { cond: 0, cond2: 0 };
+    case "misc":
+      return { cond: (c.misc ?? 0) & 0x0F, cond2: 0 };
+    case "zone": {
+      const family = 0x04 | (c.active ? 0x02 : 0);
+      return { cond: family, cond2: ((c.index ?? 0) & 0xFF) << 8 };
+    }
+    case "unit": {
+      const family = 0x08 | (c.active ? 0x02 : 0);
+      return { cond: family, cond2: ((c.index ?? 0) & 0xFF) << 8 };
+    }
+    case "time": {
+      const family = 0x0C | (c.active ? 0x02 : 0);
+      return { cond: family, cond2: ((c.index ?? 0) & 0xFF) << 8 };
+    }
+    case "sec": {
+      const area = (c.index ?? 1) & 0x0F;
+      const mode = (c.mode ?? 0) & 0x07;
+      const family = (mode << 4) | area;
+      return { cond: family, cond2: 0 };
+    }
+  }
+}
+
+/** True if the AND/OR record's op byte indicates a Structured-OP
+ *  comparison (TEMP > 70 etc.) rather than the Traditional bit-packed
+ *  condition. Structured records use entirely different field
+ *  semantics; the editor in this pass renders them read-only.
+ *
+ *  OP byte lives at fields.cond >> 8 (disk byte 2). 0 = Traditional;
+ *  1..9 = Structured (CondOP enum).
+ */
+export function isStructuredAnd(fields: ProgramFields): boolean {
+  return (((fields.cond ?? 0) >> 8) & 0xFF) !== 0;
+}
+
+/** Build a fresh empty AND record (Traditional, NEVER condition). */
+export function emptyAndRecord(): ProgramFields {
+  return {
+    prog_type: PROGRAM_TYPE_AND,
+    cond: 0x01,    // family OTHER (0x00) + misc NEVER (0x01)
+    cond2: 0, cmd: 0, par: 0, pr2: 0,
+    month: 0, day: 0, days: 0, hour: 0, minute: 0,
+  };
+}
+
+/** Build a fresh empty OR record. Same shape as AND with a different
+ *  prog_type — semantically starts a new group in the conditions list.
+ */
+export function emptyOrRecord(): ProgramFields {
+  return { ...emptyAndRecord(), prog_type: PROGRAM_TYPE_OR };
+}
+
+/** Build a fresh empty THEN action record (Turn OFF unit 1). */
+export function emptyThenRecord(firstUnit: number = 1): ProgramFields {
+  return {
+    prog_type: PROGRAM_TYPE_THEN,
+    cmd: 0,        // UNIT_OFF
+    par: 0,
+    pr2: firstUnit,
+    cond: 0, cond2: 0,
+    month: 0, day: 0, days: 0, hour: 0, minute: 0,
+  };
 }
 
 /** HA's hass object — minimal surface we use. */

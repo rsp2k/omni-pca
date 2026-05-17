@@ -25,8 +25,12 @@ import {
   MONTH_NAMES,
   NamedObject,
   ObjectListResponse,
+  PROGRAM_TYPE_AT,
   PROGRAM_TYPE_EVENT,
+  PROGRAM_TYPE_EVERY,
+  PROGRAM_TYPE_OR,
   PROGRAM_TYPE_TIMED,
+  PROGRAM_TYPE_WHEN,
   PROGRAM_TYPE_YEARLY,
   ProgramDetail,
   ProgramFields,
@@ -34,11 +38,17 @@ import {
   ProgramRow,
   SECURITY_MODE_NAMES,
   commandOptionFor,
+  decodeAndCondition,
   decodeCondition,
   decodeEventId,
+  emptyAndRecord,
+  emptyOrRecord,
+  emptyThenRecord,
+  encodeAndCondition,
   encodeCondition,
   encodeEventId,
   eventIdFromFields,
+  isStructuredAnd,
   packEventIdIntoFields,
 } from "./types.js";
 
@@ -100,6 +110,18 @@ export class OmniPanelPrograms extends LitElement {
   // omni_pca/programs/write websocket, Cancel discards.
   @state() private _editingDraft: ProgramFields | null = null;
   @state() private _objects: ObjectListResponse | null = null;
+  // Separate edit state for clausal chains. Set when the user clicks
+  // "Edit chain"; null otherwise. Head + conditions + actions are kept
+  // as parallel arrays so add/remove operations on a specific list
+  // don't churn the others. ``headSlot`` is the chain's anchor; the
+  // backend writes the new chain into [headSlot, headSlot+len) and
+  // clears any old slots beyond.
+  @state() private _chainDraft: {
+    headSlot: number;
+    head: ProgramFields;
+    conditions: ProgramFields[];
+    actions: ProgramFields[];
+  } | null = null;
 
   private _refreshTimer: number | null = null;
 
@@ -324,23 +346,128 @@ export class OmniPanelPrograms extends LitElement {
   }
 
   private async _beginEdit(): Promise<void> {
-    if (!this._detail || this._detail.kind !== "compact") return;
-    // The frontend supports editing compact-form TIMED / EVENT / YEARLY
-    // programs. Other compact types (REMARK) and clausal chains remain
-    // read-only — the editor pathway returns early without seeding a
-    // draft so the read-only view stays visible.
-    if (!EDITABLE_PROG_TYPES.has(this._detail.trigger_type)) return;
+    if (!this._detail) return;
     await this._ensureObjectsLoaded();
     if (!this._entryId) return;
-    // The detail response now carries raw fields directly. If they're
-    // missing (panel returned only tokens) we fall back to sensible
-    // defaults so the form at least opens — better than a hard error.
+    if (this._detail.kind === "chain") {
+      this._beginChainEdit();
+      return;
+    }
+    // The frontend supports editing compact-form TIMED / EVENT / YEARLY
+    // programs. Other compact types (REMARK) remain read-only — the
+    // editor pathway returns early without seeding a draft so the
+    // read-only view stays visible.
+    if (!EDITABLE_PROG_TYPES.has(this._detail.trigger_type)) return;
     const fields = this._detail.fields ?? this._defaultFieldsForType(
       this._detail.trigger_type,
     );
     if (fields === null) return;
     this._editingDraft = { ...fields };
     this._stopRefreshTimer();
+  }
+
+  private _beginChainEdit(): void {
+    if (!this._detail || !this._detail.chain_members) return;
+    const members = this._detail.chain_members;
+    const head = members.find((m) => m.role === "head");
+    if (!head) return;
+    this._chainDraft = {
+      headSlot: head.slot,
+      head: { ...head.fields },
+      conditions: members
+        .filter((m) => m.role === "condition")
+        .map((m) => ({ ...m.fields })),
+      actions: members
+        .filter((m) => m.role === "action")
+        .map((m) => ({ ...m.fields })),
+    };
+    this._stopRefreshTimer();
+  }
+
+  private _cancelChainEdit(): void {
+    this._chainDraft = null;
+    this._startRefreshTimer();
+  }
+
+  private async _saveChainDraft(): Promise<void> {
+    if (!this._chainDraft || !this._entryId) return;
+    this._writeFeedback = "saving chain…";
+    try {
+      await this.hass.connection.sendMessagePromise({
+        type: "omni_pca/programs/chain/write",
+        entry_id: this._entryId,
+        head_slot: this._chainDraft.headSlot,
+        head: this._chainDraft.head,
+        conditions: this._chainDraft.conditions,
+        actions: this._chainDraft.actions,
+      });
+      this._writeFeedback = `saved chain @ slot ${this._chainDraft.headSlot}`;
+      const headSlot = this._chainDraft.headSlot;
+      this._chainDraft = null;
+      this._startRefreshTimer();
+      await this._loadList();
+      await this._loadDetail(headSlot);
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this._writeFeedback = `error: ${m}`;
+    }
+    setTimeout(() => { this._writeFeedback = null; }, 4000);
+  }
+
+  // ---- chain draft mutation helpers ---------------------------------
+
+  private _patchChainHead(patch: Partial<ProgramFields>): void {
+    if (!this._chainDraft) return;
+    this._chainDraft = {
+      ...this._chainDraft,
+      head: { ...this._chainDraft.head, ...patch },
+    };
+  }
+
+  private _patchChainCondition(idx: number, patch: Partial<ProgramFields>): void {
+    if (!this._chainDraft) return;
+    const conds = [...this._chainDraft.conditions];
+    conds[idx] = { ...conds[idx], ...patch };
+    this._chainDraft = { ...this._chainDraft, conditions: conds };
+  }
+
+  private _addChainCondition(asOr: boolean = false): void {
+    if (!this._chainDraft) return;
+    const fresh = asOr ? emptyOrRecord() : emptyAndRecord();
+    this._chainDraft = {
+      ...this._chainDraft,
+      conditions: [...this._chainDraft.conditions, fresh],
+    };
+  }
+
+  private _removeChainCondition(idx: number): void {
+    if (!this._chainDraft) return;
+    const conds = this._chainDraft.conditions.filter((_, i) => i !== idx);
+    this._chainDraft = { ...this._chainDraft, conditions: conds };
+  }
+
+  private _patchChainAction(idx: number, patch: Partial<ProgramFields>): void {
+    if (!this._chainDraft) return;
+    const actions = [...this._chainDraft.actions];
+    actions[idx] = { ...actions[idx], ...patch };
+    this._chainDraft = { ...this._chainDraft, actions: actions };
+  }
+
+  private _addChainAction(): void {
+    if (!this._chainDraft) return;
+    const firstUnit = this._objects?.units?.[0]?.index ?? 1;
+    this._chainDraft = {
+      ...this._chainDraft,
+      actions: [...this._chainDraft.actions, emptyThenRecord(firstUnit)],
+    };
+  }
+
+  private _removeChainAction(idx: number): void {
+    if (!this._chainDraft) return;
+    // Guard: a chain must have at least one action.
+    if (this._chainDraft.actions.length <= 1) return;
+    const actions = this._chainDraft.actions.filter((_, i) => i !== idx);
+    this._chainDraft = { ...this._chainDraft, actions: actions };
   }
 
   private _defaultFieldsForType(triggerType: string): ProgramFields | null {
@@ -767,6 +894,9 @@ export class OmniPanelPrograms extends LitElement {
     if (this._editingDraft !== null) {
       return this._renderEditor(d);
     }
+    if (this._chainDraft !== null) {
+      return this._renderChainEditor(d);
+    }
     return html`
       <aside class="detail">
         <header>
@@ -785,7 +915,9 @@ export class OmniPanelPrograms extends LitElement {
             class="fire"
             @click=${() => this._fireProgram(d.slot)}
           >▶ Fire now</button>
-          ${d.kind === "compact" && EDITABLE_PROG_TYPES.has(d.trigger_type) ? html`
+          ${
+            (d.kind === "compact" && EDITABLE_PROG_TYPES.has(d.trigger_type))
+            || d.kind === "chain" ? html`
             <button
               type="button"
               class="secondary"
@@ -1378,6 +1510,587 @@ export class OmniPanelPrograms extends LitElement {
       </label>`;
   }
 
+  // ---- clausal chain editor -----------------------------------------
+
+  private _renderChainEditor(d: ProgramDetail): TemplateResult {
+    const draft = this._chainDraft!;
+    return html`
+      <aside class="detail editor">
+        <header>
+          <div>
+            <span class="trigger-badge trigger-${d.trigger_type.toLowerCase()}">
+              EDIT • ${d.trigger_type}
+            </span>
+            <span class="slot">head @ slot #${draft.headSlot}</span>
+          </div>
+          <button type="button" class="close" @click=${this._cancelChainEdit}>×</button>
+        </header>
+
+        <div class="editor-body">
+          ${this._renderChainHeadSection(draft.head)}
+          ${this._renderChainConditionsSection(draft.conditions)}
+          ${this._renderChainActionsSection(draft.actions)}
+          <div class="chain-meta">
+            Chain will occupy <strong>${1 + draft.conditions.length + draft.actions.length}</strong>
+            consecutive slots starting at #${draft.headSlot}.
+          </div>
+        </div>
+
+        <footer>
+          <button type="button" class="primary" @click=${this._saveChainDraft}>
+            Save chain
+          </button>
+          <button type="button" class="secondary" @click=${this._cancelChainEdit}>
+            Cancel
+          </button>
+          ${this._writeFeedback ? html`
+            <span class="fire-feedback">${this._writeFeedback}</span>` : ""}
+        </footer>
+      </aside>
+    `;
+  }
+
+  private _renderChainHeadSection(head: ProgramFields): TemplateResult {
+    // Reuse the existing trigger-section renderers from the compact-form
+    // editor — head records share the same field semantics as their
+    // compact counterparts (AT = TIMED, WHEN = EVENT, EVERY uses
+    // cond/cond2 for interval). The renderers patch via _patchDraft,
+    // which we shim to redirect to _patchChainHead while in chain mode.
+    if (head.prog_type === PROGRAM_TYPE_WHEN) {
+      return this._renderEventTriggerChain(head);
+    }
+    if (head.prog_type === PROGRAM_TYPE_AT) {
+      return this._renderTimedTriggerChain(head);
+    }
+    if (head.prog_type === PROGRAM_TYPE_EVERY) {
+      return this._renderEveryTriggerChain(head);
+    }
+    return html`
+      <div class="conditions-readonly">
+        Editing trigger type ${head.prog_type} (chain head) is not supported.
+      </div>`;
+  }
+
+  private _renderTimedTriggerChain(head: ProgramFields): TemplateResult {
+    // Same fields as TIMED compact: hour/minute/days.
+    return html`
+      <fieldset>
+        <legend>AT (trigger)</legend>
+        <div class="row">
+          <label>
+            Hour
+            <input type="number" min="0" max="23"
+              .value=${String(head.hour ?? 0)}
+              @input=${(e: Event) => this._patchChainHead({
+                hour: parseInt((e.target as HTMLInputElement).value, 10) || 0,
+              })}
+            />
+          </label>
+          <span class="time-colon">:</span>
+          <label>
+            Minute
+            <input type="number" min="0" max="59"
+              .value=${String(head.minute ?? 0)}
+              @input=${(e: Event) => this._patchChainHead({
+                minute: parseInt((e.target as HTMLInputElement).value, 10) || 0,
+              })}
+            />
+          </label>
+        </div>
+        <div class="days-row">
+          ${DAY_BITS.map((d) => {
+            const active = ((head.days ?? 0) & d.bit) !== 0;
+            return html`
+              <button type="button"
+                class="day-toggle ${active ? "active" : ""}"
+                @click=${() => this._patchChainHead({
+                  days: (head.days ?? 0) ^ d.bit,
+                })}
+              >${d.label}</button>`;
+          })}
+        </div>
+      </fieldset>
+    `;
+  }
+
+  private _renderEventTriggerChain(head: ProgramFields): TemplateResult {
+    // WHEN heads use the same event-id packing as EVENT compact-form:
+    // month/day bytes carry (event_id >> 8) and (event_id & 0xFF).
+    const eventId = ((head.month ?? 0) << 8) | (head.day ?? 0);
+    const decoded = decodeEventId(eventId);
+    const setEvent = (e: DecodedEvent) => {
+      const id = encodeEventId(e);
+      this._patchChainHead({
+        month: (id >> 8) & 0xFF,
+        day: id & 0xFF,
+      });
+    };
+    return html`
+      <fieldset>
+        <legend>WHEN (trigger event)</legend>
+        <label class="block">
+          Category
+          <select @change=${(e: Event) => {
+            const cat = (e.target as HTMLSelectElement).value as EventCategory;
+            if (cat === "button") {
+              const fb = this._objects?.buttons?.[0]?.index ?? 1;
+              setEvent({ category: "button", button: fb });
+            } else if (cat === "zone") {
+              const fz = this._objects?.zones?.[0]?.index ?? 1;
+              setEvent({ category: "zone", zone: fz, zoneState: 1 });
+            } else if (cat === "unit") {
+              const fu = this._objects?.units?.[0]?.index ?? 1;
+              setEvent({ category: "unit", unit: fu, unitOn: true });
+            } else if (cat === "fixed") {
+              setEvent({ category: "fixed", fixedId: 772 });
+            }
+          }}>
+            <option value="button" ?selected=${decoded.category === "button"}>Button press</option>
+            <option value="zone" ?selected=${decoded.category === "zone"}>Zone state change</option>
+            <option value="unit" ?selected=${decoded.category === "unit"}>Unit state change</option>
+            <option value="fixed" ?selected=${decoded.category === "fixed"}>Fixed (phone / AC)</option>
+            ${decoded.category === "raw" ? html`
+              <option value="raw" selected>Raw 0x${eventId.toString(16).padStart(4, "0")}</option>` : ""}
+          </select>
+        </label>
+        ${this._renderChainEventSubfields(decoded, setEvent)}
+      </fieldset>
+    `;
+  }
+
+  private _renderChainEventSubfields(
+    decoded: DecodedEvent, setEvent: (e: DecodedEvent) => void,
+  ): TemplateResult {
+    if (decoded.category === "button") {
+      const buttons = this._bucketWithPreserve(
+        this._objects?.buttons ?? null, "button", decoded.button ?? 0,
+      );
+      return html`
+        <label class="block">
+          Button
+          <select @change=${(e: Event) => setEvent({
+            category: "button",
+            button: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${buttons.map((b) => html`
+              <option .value=${String(b.index)}
+                      ?selected=${b.index === decoded.button}>
+                #${b.index} ${b.name}
+              </option>
+            `)}
+          </select>
+        </label>`;
+    }
+    if (decoded.category === "zone") {
+      const zones = this._bucketWithPreserve(
+        this._objects?.zones ?? null, "zone", decoded.zone ?? 0,
+      );
+      return html`
+        <label class="block">
+          Zone
+          <select @change=${(e: Event) => setEvent({
+            ...decoded, category: "zone",
+            zone: parseInt((e.target as HTMLSelectElement).value, 10),
+            zoneState: decoded.zoneState ?? 1,
+          })}>
+            ${zones.map((z) => html`
+              <option .value=${String(z.index)}
+                      ?selected=${z.index === decoded.zone}>
+                #${z.index} ${z.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Becomes
+          <select @change=${(e: Event) => setEvent({
+            ...decoded, category: "zone",
+            zone: decoded.zone ?? 1,
+            zoneState: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            <option value="0" ?selected=${decoded.zoneState === 0}>secure</option>
+            <option value="1" ?selected=${decoded.zoneState === 1}>not ready</option>
+            <option value="2" ?selected=${decoded.zoneState === 2}>trouble</option>
+            <option value="3" ?selected=${decoded.zoneState === 3}>tamper</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.category === "unit") {
+      const units = this._bucketWithPreserve(
+        this._objects?.units ?? null, "unit", decoded.unit ?? 0,
+      );
+      return html`
+        <label class="block">
+          Unit
+          <select @change=${(e: Event) => setEvent({
+            ...decoded, category: "unit",
+            unit: parseInt((e.target as HTMLSelectElement).value, 10),
+            unitOn: decoded.unitOn ?? true,
+          })}>
+            ${units.map((u) => html`
+              <option .value=${String(u.index)}
+                      ?selected=${u.index === decoded.unit}>
+                #${u.index} ${u.name}
+              </option>
+            `)}
+          </select>
+        </label>
+        <label class="block">
+          Turns
+          <select @change=${(e: Event) => setEvent({
+            ...decoded, category: "unit",
+            unit: decoded.unit ?? 1,
+            unitOn: (e.target as HTMLSelectElement).value === "1",
+          })}>
+            <option value="1" ?selected=${decoded.unitOn === true}>ON</option>
+            <option value="0" ?selected=${decoded.unitOn === false}>OFF</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.category === "fixed") {
+      return html`
+        <label class="block">
+          Event
+          <select @change=${(e: Event) => setEvent({
+            category: "fixed",
+            fixedId: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${FIXED_EVENTS.map((f) => html`
+              <option .value=${String(f.id)}
+                      ?selected=${f.id === decoded.fixedId}>
+                ${f.label}
+              </option>
+            `)}
+          </select>
+        </label>`;
+    }
+    return html`<div class="conditions-readonly">Unrecognised event ID. Pick a category to redefine.</div>`;
+  }
+
+  private _renderEveryTriggerChain(head: ProgramFields): TemplateResult {
+    // EVERY's interval = ((cond & 0xFF) << 8) | ((cond2 >> 8) & 0xFF).
+    // Decode for display; the editor exposes a single "seconds" input
+    // and packs back to cond + cond2 on change.
+    const interval =
+      (((head.cond ?? 0) & 0xFF) << 8) | (((head.cond2 ?? 0) >> 8) & 0xFF);
+    return html`
+      <fieldset>
+        <legend>EVERY (interval, seconds)</legend>
+        <label class="block">
+          Seconds between fires
+          <input type="number" min="1" max="65535"
+            .value=${String(interval || 1)}
+            @input=${(e: Event) => {
+              const sec = parseInt((e.target as HTMLInputElement).value, 10);
+              if (!Number.isFinite(sec) || sec < 1) return;
+              this._patchChainHead({
+                cond: (sec >> 8) & 0xFF,
+                cond2: (sec & 0xFF) << 8,
+              });
+            }}
+          />
+        </label>
+      </fieldset>
+    `;
+  }
+
+  private _renderChainConditionsSection(conds: ProgramFields[]): TemplateResult {
+    return html`
+      <fieldset>
+        <legend>
+          Conditions (${conds.length})
+          <button type="button" class="mini-btn" @click=${() => this._addChainCondition(false)}>
+            + AND IF
+          </button>
+          <button type="button" class="mini-btn" @click=${() => this._addChainCondition(true)}>
+            + OR IF
+          </button>
+        </legend>
+        ${conds.length === 0 ? html`
+          <div class="conditions-readonly">
+            No conditions — chain fires unconditionally when triggered.
+          </div>` : ""}
+        ${conds.map((c, idx) => this._renderChainConditionRow(c, idx))}
+      </fieldset>
+    `;
+  }
+
+  private _renderChainConditionRow(
+    cond: ProgramFields, idx: number,
+  ): TemplateResult {
+    const isOr = cond.prog_type === PROGRAM_TYPE_OR;
+    if (isStructuredAnd(cond)) {
+      return html`
+        <div class="cond-slot structured-cond">
+          <div>
+            <strong>${isOr ? "OR IF" : "AND IF"}</strong> (structured comparison — read-only)
+            <button type="button" class="mini-btn danger"
+              @click=${() => this._removeChainCondition(idx)}>×</button>
+          </div>
+          <div class="conditions-readonly">
+            This condition uses a structured comparison (TEMP &gt; N etc.).
+            Editing structured-OP records is not yet supported; it's
+            preserved on save.
+          </div>
+        </div>`;
+    }
+    const decoded = decodeAndCondition(cond);
+    return html`
+      <div class="cond-slot">
+        <div class="cond-row-header">
+          <strong>${isOr ? "OR IF" : "AND IF"}</strong>
+          <button type="button" class="mini-btn danger"
+            @click=${() => this._removeChainCondition(idx)}>×</button>
+        </div>
+        ${this._renderChainCondFamily(decoded, idx)}
+      </div>`;
+  }
+
+  private _renderChainCondFamily(
+    decoded: DecodedCondition, idx: number,
+  ): TemplateResult {
+    const setFamily = (family: CondFamily) => {
+      const firstZone = this._objects?.zones?.[0]?.index ?? 1;
+      const firstUnit = this._objects?.units?.[0]?.index ?? 1;
+      const firstArea = this._objects?.areas?.[0]?.index ?? 1;
+      let next: DecodedCondition;
+      switch (family) {
+        case "none":  next = { family: "none" }; break;
+        case "misc":  next = { family: "misc", misc: 1 }; break;
+        case "zone":  next = { family: "zone", index: firstZone, active: false }; break;
+        case "unit":  next = { family: "unit", index: firstUnit, active: true }; break;
+        case "time":  next = { family: "time", index: 1, active: true }; break;
+        case "sec":   next = { family: "sec", index: firstArea, mode: 0 }; break;
+      }
+      const enc = encodeAndCondition(next);
+      this._patchChainCondition(idx, enc);
+    };
+    const setDecoded = (next: DecodedCondition) => {
+      this._patchChainCondition(idx, encodeAndCondition(next));
+    };
+    return html`
+      <label class="block">
+        Family
+        <select @change=${(e: Event) =>
+          setFamily((e.target as HTMLSelectElement).value as CondFamily)}>
+          <option value="zone" ?selected=${decoded.family === "zone"}>Zone state</option>
+          <option value="unit" ?selected=${decoded.family === "unit"}>Unit state</option>
+          <option value="sec"  ?selected=${decoded.family === "sec"}>Area in security mode</option>
+          <option value="time" ?selected=${decoded.family === "time"}>Time clock</option>
+          <option value="misc" ?selected=${decoded.family === "misc"}>Misc</option>
+        </select>
+      </label>
+      ${this._renderChainCondSubfields(decoded, setDecoded)}
+    `;
+  }
+
+  private _renderChainCondSubfields(
+    decoded: DecodedCondition, setDecoded: (d: DecodedCondition) => void,
+  ): TemplateResult {
+    if (decoded.family === "zone") {
+      const zones = this._bucketWithPreserve(
+        this._objects?.zones ?? null, "zone", decoded.index ?? 0,
+      );
+      return html`
+        <label class="block">
+          Zone
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, index: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${zones.map((z) => html`
+              <option .value=${String(z.index)} ?selected=${z.index === decoded.index}>
+                #${z.index} ${z.name}
+              </option>`)}
+          </select>
+        </label>
+        <label class="block">
+          Is
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, active: (e.target as HTMLSelectElement).value === "1",
+          })}>
+            <option value="0" ?selected=${!decoded.active}>secure</option>
+            <option value="1" ?selected=${decoded.active}>not ready</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.family === "unit") {
+      const units = this._bucketWithPreserve(
+        this._objects?.units ?? null, "unit", decoded.index ?? 0,
+      );
+      return html`
+        <label class="block">
+          Unit
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, index: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${units.map((u) => html`
+              <option .value=${String(u.index)} ?selected=${u.index === decoded.index}>
+                #${u.index} ${u.name}
+              </option>`)}
+          </select>
+        </label>
+        <label class="block">
+          Is
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, active: (e.target as HTMLSelectElement).value === "1",
+          })}>
+            <option value="1" ?selected=${decoded.active}>ON</option>
+            <option value="0" ?selected=${!decoded.active}>OFF</option>
+          </select>
+        </label>`;
+    }
+    if (decoded.family === "sec") {
+      const areas = this._bucketWithPreserve(
+        this._objects?.areas ?? null, "area", decoded.index ?? 0,
+      );
+      return html`
+        <label class="block">
+          Area
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, index: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${areas.map((a) => html`
+              <option .value=${String(a.index)} ?selected=${a.index === decoded.index}>
+                #${a.index} ${a.name}
+              </option>`)}
+          </select>
+        </label>
+        <label class="block">
+          Mode
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, mode: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${SECURITY_MODE_NAMES.map((m) => html`
+              <option .value=${String(m.value)} ?selected=${m.value === decoded.mode}>
+                ${m.label}
+              </option>`)}
+          </select>
+        </label>`;
+    }
+    if (decoded.family === "time") {
+      return html`
+        <label class="block">
+          Time clock # (1..3)
+          <input type="number" min="1" max="3"
+            .value=${String(decoded.index ?? 1)}
+            @input=${(e: Event) => {
+              const idx = parseInt((e.target as HTMLInputElement).value, 10);
+              if (Number.isFinite(idx)) setDecoded({ ...decoded, index: idx });
+            }}
+          />
+        </label>
+        <label class="block">
+          Is
+          <select @change=${(e: Event) => setDecoded({
+            ...decoded, active: (e.target as HTMLSelectElement).value === "1",
+          })}>
+            <option value="1" ?selected=${decoded.active}>enabled</option>
+            <option value="0" ?selected=${!decoded.active}>disabled</option>
+          </select>
+        </label>`;
+    }
+    // misc
+    return html`
+      <label class="block">
+        Condition
+        <select @change=${(e: Event) => setDecoded({
+          family: "misc",
+          misc: parseInt((e.target as HTMLSelectElement).value, 10),
+        })}>
+          ${MISC_CONDITIONALS.map((m) => html`
+            <option .value=${String(m.value)} ?selected=${m.value === decoded.misc}>
+              ${m.label}
+            </option>`)}
+        </select>
+      </label>`;
+  }
+
+  private _renderChainActionsSection(actions: ProgramFields[]): TemplateResult {
+    return html`
+      <fieldset>
+        <legend>
+          Actions (${actions.length})
+          <button type="button" class="mini-btn"
+            @click=${() => this._addChainAction()}>+ THEN</button>
+        </legend>
+        ${actions.map((a, idx) => this._renderChainActionRow(a, idx, actions.length))}
+      </fieldset>
+    `;
+  }
+
+  private _renderChainActionRow(
+    action: ProgramFields, idx: number, total: number,
+  ): TemplateResult {
+    const cmdOpt: CommandOption | undefined = commandOptionFor(action.cmd ?? 0);
+    const objectBucket = cmdOpt?.ref_kind
+      ? this._bucketWithPreserve(
+          this._pickBucket(cmdOpt.ref_kind),
+          cmdOpt.ref_kind,
+          action.pr2 ?? 0,
+        )
+      : null;
+    const showsLevelPercent = action.cmd === 9;
+    return html`
+      <div class="cond-slot">
+        <div class="cond-row-header">
+          <strong>${idx === 0 ? "THEN" : "AND"}</strong>
+          ${total > 1 ? html`
+            <button type="button" class="mini-btn danger"
+              @click=${() => this._removeChainAction(idx)}>×</button>` : ""}
+        </div>
+        <label class="block">
+          Command
+          <select @change=${(e: Event) => {
+            const value = parseInt((e.target as HTMLSelectElement).value, 10);
+            const opt = commandOptionFor(value);
+            let newPr2 = action.pr2 ?? 0;
+            if (opt?.ref_kind && this._objects) {
+              const bucket = this._pickBucket(opt.ref_kind);
+              if (bucket && bucket.length > 0 &&
+                  !bucket.some((o) => o.index === newPr2)) {
+                newPr2 = bucket[0].index;
+              }
+            } else if (!opt?.ref_kind) {
+              newPr2 = 0;
+            }
+            this._patchChainAction(idx, { cmd: value, pr2: newPr2 });
+          }}>
+            ${COMMAND_OPTIONS.map((c) => html`
+              <option .value=${String(c.value)} ?selected=${c.value === action.cmd}>
+                ${c.label}
+              </option>`)}
+          </select>
+        </label>
+        ${cmdOpt?.ref_kind ? html`
+          <label class="block">
+            ${cmdOpt.ref_kind[0].toUpperCase() + cmdOpt.ref_kind.slice(1)}
+            <select @change=${(e: Event) => {
+              const v = parseInt((e.target as HTMLSelectElement).value, 10);
+              if (Number.isFinite(v)) this._patchChainAction(idx, { pr2: v });
+            }}>
+              ${(objectBucket ?? []).map((o) => html`
+                <option .value=${String(o.index)} ?selected=${o.index === action.pr2}>
+                  #${o.index} ${o.name}
+                </option>`)}
+            </select>
+          </label>` : ""}
+        ${showsLevelPercent ? html`
+          <label class="block">
+            Level (0..100)
+            <input type="number" min="0" max="100"
+              .value=${String(action.par ?? 0)}
+              @input=${(e: Event) => {
+                const v = parseInt((e.target as HTMLInputElement).value, 10);
+                if (Number.isFinite(v) && v >= 0 && v <= 100) {
+                  this._patchChainAction(idx, { par: v });
+                }
+              }}
+            />
+          </label>` : ""}
+      </div>
+    `;
+  }
+
   // -- styles -----------------------------------------------------------
 
   static styles = css`
@@ -1723,6 +2436,37 @@ export class OmniPanelPrograms extends LitElement {
     .cond-family-label {
       font-weight: 600;
       color: var(--primary-text-color, #000);
+    }
+    .cond-row-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 4px;
+    }
+    .mini-btn {
+      border: 1px solid var(--divider-color, #ccc);
+      background: var(--card-background-color, #fff);
+      color: inherit;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      font-family: inherit;
+      margin-left: 6px;
+    }
+    .mini-btn:hover { background: var(--secondary-background-color, #eee); }
+    .mini-btn.danger {
+      color: var(--error-color, #db4437);
+      border-color: var(--error-color, #db4437);
+    }
+    .structured-cond {
+      background: rgba(255, 152, 0, 0.08);  /* subtle warning tint */
+    }
+    .chain-meta {
+      margin-top: 8px;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      color: var(--secondary-text-color, #666);
+      background: var(--secondary-background-color, #f5f5f5);
+      border-radius: 4px;
     }
   `;
 }

@@ -368,6 +368,21 @@ async def _ws_get_program(
             "tokens": _tokens_to_json(tokens),
             "references": _extract_references(tokens),
             "chain_slots": [m.slot for m in members if m.slot is not None],
+            # Per-member raw fields + role so the editor can render
+            # an editable form for each line of the clausal chain.
+            # role is "head" / "condition" / "action".
+            "chain_members": [
+                {
+                    "slot": m.slot,
+                    "role": (
+                        "head" if m is containing_chain.head
+                        else "action" if m in containing_chain.actions
+                        else "condition"
+                    ),
+                    "fields": _program_to_fields(m),
+                }
+                for m in members if m.slot is not None
+            ],
         })
         return
 
@@ -423,6 +438,159 @@ _PROGRAM_FIELD_SCHEMA = vol.Schema(
     },
     extra=vol.PREVENT_EXTRA,
 )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "omni_pca/programs/chain/write",
+        vol.Required("entry_id"): str,
+        vol.Required("head_slot"): vol.All(int, vol.Range(min=1, max=1500)),
+        vol.Required("head"): dict,        # WHEN / AT / EVERY program dict
+        vol.Required("conditions"): [dict],
+        vol.Required("actions"): [dict],
+    }
+)
+@websocket_api.async_response
+async def _ws_chain_write(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Rewrite a clausal chain into consecutive slots.
+
+    A clausal program spans one head (WHEN/AT/EVERY) + N condition
+    records (AND/OR) + M action records (THEN), each in its own slot.
+    Editing means rewriting the whole run.
+
+    Logic:
+      1. Find the *existing* chain that owns ``head_slot`` (so we know
+         which old slots to clear when the chain shrinks).
+      2. The new run spans slots [head_slot .. head_slot + new_len - 1].
+         If new_len > old_len, the additional slots must currently be
+         FREE — refuse otherwise so we never trample an adjacent
+         program.
+      3. Write each new record via ``download_program``. The new run's
+         records are emitted in slot order; THEN actions land last.
+      4. Clear any old chain slots beyond the new run's end (shrinking
+         case) so leftover continuation records don't get mis-associated
+         with the now-shorter chain.
+    """
+    coordinator = _coordinator_for_entry(hass, msg["entry_id"])
+    if coordinator is None:
+        connection.send_error(msg["id"], "not_found", "panel not configured")
+        return
+    try:
+        client = coordinator.client
+    except RuntimeError as err:
+        connection.send_error(msg["id"], "not_connected", str(err))
+        return
+
+    from omni_pca.programs import Program  # local — avoid cycle
+
+    # Validate every member dict against the per-record schema (used
+    # individually so each member can have its own defaults).
+    try:
+        head_fields = _PROGRAM_FIELD_SCHEMA(msg["head"])
+        condition_fields = [_PROGRAM_FIELD_SCHEMA(c) for c in msg["conditions"]]
+        action_fields = [_PROGRAM_FIELD_SCHEMA(a) for a in msg["actions"]]
+    except vol.Invalid as err:
+        connection.send_error(msg["id"], "invalid", f"bad chain member: {err}")
+        return
+
+    if not action_fields:
+        connection.send_error(
+            msg["id"], "invalid", "chain must have at least one THEN action",
+        )
+        return
+
+    head_slot = msg["head_slot"]
+    new_len = 1 + len(condition_fields) + len(action_fields)
+
+    # Find the existing chain (if any) so we know which old slots are
+    # currently part of this program. Without an existing chain we still
+    # allow writing — that's the "create chain at this empty slot" case.
+    from omni_pca.program_engine import build_chains
+
+    programs = coordinator.data.programs if coordinator.data else {}
+    existing = next(
+        (c for c in build_chains(tuple(programs.values()))
+         if c.head.slot == head_slot),
+        None,
+    )
+    existing_slots: set[int] = set()
+    if existing is not None:
+        for m in (existing.head, *existing.conditions, *existing.actions):
+            if m.slot is not None:
+                existing_slots.add(m.slot)
+
+    new_slot_range = range(head_slot, head_slot + new_len)
+    if new_slot_range.stop > 1501:
+        connection.send_error(
+            msg["id"], "invalid",
+            f"chain of {new_len} records starting at slot {head_slot} "
+            f"would extend past slot 1500",
+        )
+        return
+
+    # Anti-trample check for any expansion slots that aren't already
+    # part of this chain.
+    for s in new_slot_range:
+        if s in existing_slots:
+            continue
+        if s in programs and not programs[s].is_empty():
+            connection.send_error(
+                msg["id"], "invalid",
+                f"target slot {s} is occupied by another program "
+                f"(slot {s}); free it first",
+            )
+            return
+
+    # Build the typed records.
+    head = Program(slot=head_slot, **head_fields)
+    new_records: list[tuple[int, Program]] = [(head_slot, head)]
+    for i, cf in enumerate(condition_fields):
+        slot = head_slot + 1 + i
+        new_records.append((slot, Program(slot=slot, **cf)))
+    actions_base = head_slot + 1 + len(condition_fields)
+    for i, af in enumerate(action_fields):
+        slot = actions_base + i
+        new_records.append((slot, Program(slot=slot, **af)))
+
+    # Write them in order.
+    try:
+        for slot, prog in new_records:
+            await client.download_program(slot, prog)
+    except NotImplementedError as err:
+        connection.send_error(msg["id"], "not_supported", str(err))
+        return
+    except Exception as err:
+        connection.send_error(msg["id"], "write_failed", str(err))
+        return
+
+    # Clear any old chain slot that's not in the new range (shrinking
+    # case). Order matters: clears come *after* writes so a transient
+    # observer never sees a half-rewritten chain.
+    to_clear = existing_slots - set(new_slot_range)
+    for slot in sorted(to_clear):
+        try:
+            await client.clear_program(slot)
+        except Exception:
+            # Don't fail the whole write for a clear-failure; log and continue.
+            _log.warning("failed to clear shrunk-away slot %s", slot)
+
+    # Update coordinator state. Same shape as single-slot write: drop
+    # cleared slots, set written slots.
+    if coordinator.data is not None:
+        for slot, prog in new_records:
+            coordinator.data.programs[slot] = prog
+        for slot in to_clear:
+            coordinator.data.programs.pop(slot, None)
+
+    connection.send_result(msg["id"], {
+        "head_slot": head_slot,
+        "written_slots": list(new_slot_range),
+        "cleared_slots": sorted(to_clear),
+    })
 
 
 @websocket_api.websocket_command(
@@ -705,6 +873,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, _ws_clear_program)
     websocket_api.async_register_command(hass, _ws_clone_program)
     websocket_api.async_register_command(hass, _ws_write_program)
+    websocket_api.async_register_command(hass, _ws_chain_write)
     websocket_api.async_register_command(hass, _ws_list_objects)
 
 
