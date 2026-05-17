@@ -547,6 +547,177 @@ export function emptyThenRecord(firstUnit: number = 1): ProgramFields {
   };
 }
 
+
+// --------------------------------------------------------------------------
+// Structured-OP AND record editing.
+//
+// When ``and_op`` (= ``(cond >> 8) & 0xFF``) is non-zero, the record
+// encodes ``Arg1 OP Arg2`` where Arg1 and Arg2 are typed references
+// (Zone, Unit, Thermostat, Area, TimeDate, Constant) plus per-type
+// field selectors. This is fundamentally a different shape from the
+// Traditional encoding handled by decodeAndCondition above.
+//
+// Wire layout (from programs.py decoders + clsProgram.cs):
+//
+//   cond  high byte (>>8)  = and_op           (CondOP)
+//   cond  low byte  (& FF) = and_arg1_argtype (CondArgType)
+//   cond2 (whole u16)      = and_arg1_ix      (object index or 0)
+//   cmd                    = and_arg1_field   (per-type field selector)
+//   par                    = and_arg2_argtype (CondArgType — usually Constant)
+//   pr2                    = and_arg2_ix      (constant value OR second object idx)
+//   month                  = and_arg2_field   (per-type field selector for arg2)
+//   day, days              = and_compconst    (BE u16 — extra constant, rarely used)
+//
+// Editor cuts:
+//   * Arg2 locked to Constant in this pass (other-object Arg2 stays
+//     read-only with a banner). Arg2-constant covers
+//     "TEMP > 70", "Zone.CurrentState == 1", "Hour == 22" etc.
+//   * Arg1 restricted to Zone / Unit / Thermostat / Area / TimeDate.
+//     Anything else (Aux / Audio / System / etc.) stays read-only.
+// --------------------------------------------------------------------------
+
+
+// CondOP enum (matches omni_pca.programs.CondOP). 0=Traditional is
+// excluded from the editor — picking it would switch to Traditional
+// editing semantics.
+export const COND_OPS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 1, label: "==" },
+  { value: 2, label: "!=" },
+  { value: 3, label: "<" },
+  { value: 4, label: ">" },
+  { value: 5, label: "is odd" },
+  { value: 6, label: "is even" },
+  { value: 7, label: "is multiple of" },
+  { value: 8, label: "in (bitmask)" },
+  { value: 9, label: "not in (bitmask)" },
+];
+
+/** True iff the operator only uses Arg1 (no Arg2). */
+export function isUnaryOp(op: number): boolean {
+  return op === 5 || op === 6;  // ODD, EVEN
+}
+
+// CondArgType enum (matches omni_pca.programs.CondArgType). Only the
+// editor-supported subset; full list is in programs.py.
+export const ARG_TYPES: ReadonlyArray<{
+  value: number; label: string; kind: string | null;
+}> = [
+  { value: 0,  label: "Constant",       kind: null },
+  { value: 2,  label: "Zone",           kind: "zone" },
+  { value: 3,  label: "Unit",           kind: "unit" },
+  { value: 4,  label: "Thermostat",     kind: "thermostat" },
+  { value: 6,  label: "Area",           kind: "area" },
+  { value: 7,  label: "Time / Date",    kind: null },  // no object picker
+];
+
+export function isEditableArg1Type(argtype: number): boolean {
+  return [2, 3, 4, 6, 7].includes(argtype);
+}
+
+export function argTypeKind(argtype: number): string | null {
+  const a = ARG_TYPES.find((x) => x.value === argtype);
+  return a ? a.kind : null;
+}
+
+// Per-Arg1Type field menus. Numbers match omni_pca.programs enums
+// (enuZoneField / enuUnitField / enuThermostatField / enuTimeDateField).
+export const FIELDS_BY_TYPE: Readonly<Record<number, ReadonlyArray<{
+  value: number; label: string;
+}>>> = {
+  // Zone (argtype 2) — enuZoneField
+  2: [
+    { value: 1, label: "Loop reading" },
+    { value: 2, label: "Current state" },
+    { value: 3, label: "Arming state" },
+    { value: 4, label: "Alarm state" },
+  ],
+  // Unit (argtype 3) — enuUnitField
+  3: [
+    { value: 1, label: "Current state" },
+    { value: 2, label: "Previous state" },
+    { value: 3, label: "Timer" },
+    { value: 4, label: "Level" },
+  ],
+  // Thermostat (argtype 4) — enuThermostatField
+  4: [
+    { value: 1,  label: "Current temperature" },
+    { value: 2,  label: "Heat setpoint" },
+    { value: 3,  label: "Cool setpoint" },
+    { value: 4,  label: "System mode" },
+    { value: 5,  label: "Fan mode" },
+    { value: 6,  label: "Hold mode" },
+    { value: 7,  label: "Freeze alarm" },
+    { value: 8,  label: "Comm error" },
+    { value: 9,  label: "Humidity" },
+    { value: 10, label: "Humidify setpoint" },
+    { value: 11, label: "Dehumidify setpoint" },
+    { value: 12, label: "Outdoor temperature" },
+    { value: 13, label: "System status" },
+  ],
+  // Area (argtype 6) — single useful field
+  6: [
+    { value: 1, label: "Security mode" },
+  ],
+  // TimeDate (argtype 7) — enuTimeDateField
+  7: [
+    { value: 2,  label: "Year" },
+    { value: 3,  label: "Month" },
+    { value: 4,  label: "Day" },
+    { value: 5,  label: "Day of week (1=Mon..7=Sun)" },
+    { value: 6,  label: "Time (minutes since midnight)" },
+    { value: 8,  label: "Hour" },
+    { value: 9,  label: "Minute" },
+  ],
+};
+
+export interface DecodedStructuredAnd {
+  op: number;              // CondOP value (1..9)
+  arg1Type: number;        // CondArgType
+  arg1Ix: number;          // 1-based object index (0 for TimeDate)
+  arg1Field: number;       // per-type field
+  arg2Type: number;        // CondArgType (locked to Constant in editor)
+  arg2Ix: number;          // constant value OR second object index
+  arg2Field: number;       // per-type field (usually 0 for constants)
+  compConst: number;       // extra constant; preserved verbatim
+}
+
+export function decodeStructuredAnd(fields: ProgramFields): DecodedStructuredAnd {
+  return {
+    op:        ((fields.cond ?? 0) >> 8) & 0xFF,
+    arg1Type:  (fields.cond ?? 0) & 0xFF,
+    arg1Ix:    fields.cond2 ?? 0,
+    arg1Field: fields.cmd ?? 0,
+    arg2Type:  fields.par ?? 0,
+    arg2Ix:    fields.pr2 ?? 0,
+    arg2Field: fields.month ?? 0,
+    compConst: ((fields.day ?? 0) << 8) | (fields.days ?? 0),
+  };
+}
+
+export function encodeStructuredAnd(s: DecodedStructuredAnd): Partial<ProgramFields> {
+  return {
+    cond:  ((s.op & 0xFF) << 8) | (s.arg1Type & 0xFF),
+    cond2: s.arg1Ix & 0xFFFF,
+    cmd:   s.arg1Field & 0xFF,
+    par:   s.arg2Type & 0xFF,
+    pr2:   s.arg2Ix & 0xFFFF,
+    month: s.arg2Field & 0xFF,
+    day:   (s.compConst >> 8) & 0xFF,
+    days:  s.compConst & 0xFF,
+  };
+}
+
+/** True iff the structured AND record is in a shape the editor can
+ *  fully drive. Other shapes (Arg2=non-constant object, exotic Arg1
+ *  types, or non-zero compConst) stay read-only — they're preserved
+ *  on save but their fields aren't exposed as form controls. */
+export function isEditableStructuredAnd(s: DecodedStructuredAnd): boolean {
+  if (!isEditableArg1Type(s.arg1Type)) return false;
+  if (!isUnaryOp(s.op) && s.arg2Type !== 0) return false;
+  if (s.compConst !== 0) return false;
+  return true;
+}
+
 /** HA's hass object — minimal surface we use. */
 export interface Hass {
   connection: {

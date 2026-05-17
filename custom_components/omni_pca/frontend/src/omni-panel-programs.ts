@@ -12,13 +12,17 @@ import { LitElement, html, css, PropertyValues, TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { renderTokens } from "./token-renderer.js";
 import {
+  ARG_TYPES,
   COMMAND_OPTIONS,
+  COND_OPS,
   CommandOption,
   CondFamily,
   DAY_BITS,
   DecodedCondition,
   DecodedEvent,
+  DecodedStructuredAnd,
   EventCategory,
+  FIELDS_BY_TYPE,
   FIXED_EVENTS,
   Hass,
   MISC_CONDITIONALS,
@@ -37,18 +41,23 @@ import {
   ProgramListResponse,
   ProgramRow,
   SECURITY_MODE_NAMES,
+  argTypeKind,
   commandOptionFor,
   decodeAndCondition,
   decodeCondition,
   decodeEventId,
+  decodeStructuredAnd,
   emptyAndRecord,
   emptyOrRecord,
   emptyThenRecord,
   encodeAndCondition,
   encodeCondition,
   encodeEventId,
+  encodeStructuredAnd,
   eventIdFromFields,
+  isEditableStructuredAnd,
   isStructuredAnd,
+  isUnaryOp,
   packEventIdIntoFields,
 } from "./types.js";
 
@@ -566,10 +575,11 @@ export class OmniPanelPrograms extends LitElement {
   private _pickBucket(kind: string): NamedObject[] | null {
     if (!this._objects) return null;
     switch (kind) {
-      case "zone":   return this._objects.zones;
-      case "unit":   return this._objects.units;
-      case "area":   return this._objects.areas;
-      case "button": return this._objects.buttons;
+      case "zone":       return this._objects.zones;
+      case "unit":       return this._objects.units;
+      case "area":       return this._objects.areas;
+      case "button":     return this._objects.buttons;
+      case "thermostat": return this._objects.thermostats;
       default: return null;
     }
   }
@@ -1820,19 +1830,7 @@ export class OmniPanelPrograms extends LitElement {
   ): TemplateResult {
     const isOr = cond.prog_type === PROGRAM_TYPE_OR;
     if (isStructuredAnd(cond)) {
-      return html`
-        <div class="cond-slot structured-cond">
-          <div>
-            <strong>${isOr ? "OR IF" : "AND IF"}</strong> (structured comparison — read-only)
-            <button type="button" class="mini-btn danger"
-              @click=${() => this._removeChainCondition(idx)}>×</button>
-          </div>
-          <div class="conditions-readonly">
-            This condition uses a structured comparison (TEMP &gt; N etc.).
-            Editing structured-OP records is not yet supported; it's
-            preserved on save.
-          </div>
-        </div>`;
+      return this._renderStructuredChainConditionRow(cond, idx, isOr);
     }
     const decoded = decodeAndCondition(cond);
     return html`
@@ -1844,6 +1842,156 @@ export class OmniPanelPrograms extends LitElement {
         </div>
         ${this._renderChainCondFamily(decoded, idx)}
       </div>`;
+  }
+
+  private _renderStructuredChainConditionRow(
+    cond: ProgramFields, idx: number, isOr: boolean,
+  ): TemplateResult {
+    const s = decodeStructuredAnd(cond);
+    if (!isEditableStructuredAnd(s)) {
+      // Out of editor scope (non-constant Arg2, unsupported Arg1 type,
+      // or non-zero compConst). Surface as preserve-only so the user
+      // can still remove the row but can't damage the encoded data.
+      return html`
+        <div class="cond-slot structured-cond">
+          <div class="cond-row-header">
+            <strong>${isOr ? "OR IF" : "AND IF"}</strong>
+            <span class="readonly-tag">read-only</span>
+            <button type="button" class="mini-btn danger"
+              @click=${() => this._removeChainCondition(idx)}>×</button>
+          </div>
+          <div class="conditions-readonly">
+            Structured comparison with a shape the editor can't drive
+            yet (Arg2 references another object, Arg1 is an unsupported
+            type, or a CompConst value is present). Preserved on save.
+          </div>
+        </div>`;
+    }
+    return html`
+      <div class="cond-slot structured-cond">
+        <div class="cond-row-header">
+          <strong>${isOr ? "OR IF" : "AND IF"}</strong>
+          <span class="structured-tag">structured</span>
+          <button type="button" class="mini-btn danger"
+            @click=${() => this._removeChainCondition(idx)}>×</button>
+        </div>
+        ${this._renderStructuredAndForm(s, idx)}
+      </div>`;
+  }
+
+  /** Render the editor for one structured-AND condition. Lays out as:
+   *
+   *      Arg1 type ▸ object/picker ▸ field ▸ operator ▸ Arg2 constant
+   *
+   *  Arg2 is locked to Constant in this pass. For unary operators
+   *  (ODD / EVEN) the Arg2 input is hidden.
+   */
+  private _renderStructuredAndForm(
+    s: DecodedStructuredAnd, idx: number,
+  ): TemplateResult {
+    const update = (patch: Partial<DecodedStructuredAnd>) => {
+      const merged = { ...s, ...patch };
+      // Force Arg2 = Constant in editor scope so nothing accidentally
+      // promotes to an object reference.
+      merged.arg2Type = 0;
+      merged.arg2Field = 0;
+      this._patchChainCondition(idx, encodeStructuredAnd(merged));
+    };
+    const arg1Fields = FIELDS_BY_TYPE[s.arg1Type] ?? [];
+    const arg1Kind = argTypeKind(s.arg1Type);
+    const showArg2 = !isUnaryOp(s.op);
+    return html`
+      <div class="structured-row">
+        <label class="block">
+          Arg1 type
+          <select @change=${(e: Event) => {
+            const newType = parseInt((e.target as HTMLSelectElement).value, 10);
+            // Reset arg1Ix + field when type changes — keeps the form
+            // self-consistent and avoids stale picker values.
+            const firstField = (FIELDS_BY_TYPE[newType] ?? [{ value: 0 }])[0].value;
+            const newKind = argTypeKind(newType);
+            let newIx = 0;
+            if (newKind === "zone") newIx = this._objects?.zones?.[0]?.index ?? 1;
+            else if (newKind === "unit") newIx = this._objects?.units?.[0]?.index ?? 1;
+            else if (newKind === "thermostat") newIx = this._objects?.thermostats?.[0]?.index ?? 1;
+            else if (newKind === "area") newIx = this._objects?.areas?.[0]?.index ?? 1;
+            update({
+              arg1Type: newType,
+              arg1Ix: newIx,
+              arg1Field: firstField,
+            });
+          }}>
+            ${ARG_TYPES.filter((a) => a.value !== 0).map((a) => html`
+              <option .value=${String(a.value)} ?selected=${a.value === s.arg1Type}>
+                ${a.label}
+              </option>`)}
+          </select>
+        </label>
+
+        ${arg1Kind ? this._renderStructuredArg1Picker(s, arg1Kind, update) : ""}
+
+        ${arg1Fields.length > 0 ? html`
+          <label class="block">
+            Field
+            <select @change=${(e: Event) => update({
+              arg1Field: parseInt((e.target as HTMLSelectElement).value, 10),
+            })}>
+              ${arg1Fields.map((f) => html`
+                <option .value=${String(f.value)} ?selected=${f.value === s.arg1Field}>
+                  ${f.label}
+                </option>`)}
+            </select>
+          </label>` : ""}
+
+        <label class="block">
+          Operator
+          <select @change=${(e: Event) => update({
+            op: parseInt((e.target as HTMLSelectElement).value, 10),
+          })}>
+            ${COND_OPS.map((o) => html`
+              <option .value=${String(o.value)} ?selected=${o.value === s.op}>
+                ${o.label}
+              </option>`)}
+          </select>
+        </label>
+
+        ${showArg2 ? html`
+          <label class="block">
+            Compare against (constant)
+            <input type="number" min="0" max="65535"
+              .value=${String(s.arg2Ix)}
+              @input=${(e: Event) => {
+                const v = parseInt((e.target as HTMLInputElement).value, 10);
+                if (Number.isFinite(v) && v >= 0 && v <= 0xFFFF) {
+                  update({ arg2Ix: v });
+                }
+              }}
+            />
+          </label>` : ""}
+      </div>`;
+  }
+
+  private _renderStructuredArg1Picker(
+    s: DecodedStructuredAnd,
+    kind: string,
+    update: (p: Partial<DecodedStructuredAnd>) => void,
+  ): TemplateResult {
+    const bucket = this._bucketWithPreserve(
+      this._pickBucket(kind), kind, s.arg1Ix,
+    );
+    const label = kind[0].toUpperCase() + kind.slice(1);
+    return html`
+      <label class="block">
+        ${label}
+        <select @change=${(e: Event) => update({
+          arg1Ix: parseInt((e.target as HTMLSelectElement).value, 10),
+        })}>
+          ${bucket.map((o) => html`
+            <option .value=${String(o.index)} ?selected=${o.index === s.arg1Ix}>
+              #${o.index} ${o.name}
+            </option>`)}
+        </select>
+      </label>`;
   }
 
   private _renderChainCondFamily(
@@ -2458,7 +2606,30 @@ export class OmniPanelPrograms extends LitElement {
       border-color: var(--error-color, #db4437);
     }
     .structured-cond {
-      background: rgba(255, 152, 0, 0.08);  /* subtle warning tint */
+      background: rgba(255, 152, 0, 0.08);  /* subtle structured tint */
+    }
+    .structured-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 6px;
+    }
+    .structured-tag, .readonly-tag {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-radius: 3px;
+    }
+    .structured-tag {
+      background: rgba(255, 152, 0, 0.18);
+      color: #b35a00;
+    }
+    .readonly-tag {
+      background: var(--secondary-background-color, #eee);
+      color: var(--secondary-text-color, #888);
     }
     .chain-meta {
       margin-top: 8px;
