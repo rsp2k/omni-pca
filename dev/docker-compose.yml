@@ -35,8 +35,14 @@ services:
     volumes:
       - ../src:/tmp/mock/src:ro
       - ./run_mock_panel.py:/tmp/mock/run_mock_panel.py:ro
+      # Mount the captured .pca fixtures read-only so the mock can
+      # optionally seed its state from a real export. Set
+      # OMNI_PCA_FIXTURE in dev/.env (or pass on the command line) to
+      # activate; left unset, the mock uses the hard-coded sample.
+      - /home/kdm/home-auto/HAI:/fixtures:ro
     environment:
       PYTHONPATH: /tmp/mock/src
+      OMNI_PCA_FIXTURE: ${OMNI_PCA_FIXTURE:-}
     command:
       - sh
       - -c

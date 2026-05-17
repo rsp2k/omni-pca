@@ -44,6 +44,32 @@ make dev-down       # stop the stack
 make dev-reset      # wipe HA config and start fresh
 ```
 
+## Load real `.pca` data into the mock
+
+By default the mock serves a small synthetic state (five zones, four
+units, …). Point `OMNI_PCA_FIXTURE` at a real `.pca` file to make the
+mock indistinguishable on the wire from the source panel:
+
+```bash
+# dev/.env (gitignored)
+OMNI_PCA_FIXTURE=/fixtures/path/to/Account.pca
+```
+
+The host directory `/home/kdm/home-auto/HAI` is mounted at `/fixtures`
+inside the mock-panel container (see `docker-compose.yml`); adjust the
+mount if your `.pca` lives elsewhere.
+
+The decryption key is auto-derived from a sibling `PCA01.CFG` if one
+exists (this is how PC Access exports usually ship). To override:
+
+```bash
+OMNI_PCA_FIXTURE_KEY=0xC1A280B2   # or --pca-key on the command line
+```
+
+`MockState.from_pca` populates zones, units, areas, thermostats,
+buttons, programs, model byte, and firmware version from the file —
+everything the HA integration reads at discovery time.
+
 ## Notes
 
 - The HA container mounts `../custom_components/omni_pca/` read-only, so
