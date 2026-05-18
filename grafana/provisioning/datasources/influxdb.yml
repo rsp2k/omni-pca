@@ -1,0 +1,21 @@
+# Auto-wires the InfluxDB v2 datasource at Grafana boot. Picks up
+# INFLUX_URL and INFLUX_TOKEN from the grafana container's environment
+# (set in docker-compose.yml from .env). No manual datasource config
+# needed.
+
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: ${INFLUX_URL}
+    isDefault: true
+    editable: false
+    jsonData:
+      version: Flux
+      organization: omni-pca
+      defaultBucket: ha
+      tlsSkipVerify: true
+    secureJsonData:
+      token: ${INFLUX_TOKEN}

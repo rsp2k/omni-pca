@@ -1,0 +1,682 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Live view of an HAI/Leviton Omni Pro II panel surfaced by the omni_pca Home Assistant integration. System health, security activity, climate trends, and the typed push-event stream — all sourced from InfluxDB writes shipped by HA's influxdb integration.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "panels": [],
+      "title": "System health",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [
+            {"options": {"0": {"color": "red", "index": 0, "text": "LOST"}}, "type": "value"},
+            {"options": {"1": {"color": "green", "index": 1, "text": "OK"}}, "type": "value"}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "green", "value": 1}]},
+          "unit": "none"
+        }
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
+      "id": 101,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r.domain == \"binary_sensor\")\n  |> filter(fn: (r) => r.entity_id =~ /ac_power/ and not (r.entity_id =~ /_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"value\")\n  |> last()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "AC power",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [
+            {"options": {"0": {"color": "green", "index": 0, "text": "OK"}}, "type": "value"},
+            {"options": {"1": {"color": "red", "index": 1, "text": "LOW"}}, "type": "value"}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "red", "value": 1}]}
+        }
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 1},
+      "id": 102,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r.domain == \"binary_sensor\")\n  |> filter(fn: (r) => r.entity_id =~ /battery/ and not (r.entity_id =~ /_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"value\")\n  |> last()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "Backup battery",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [
+            {"options": {"0": {"color": "green", "index": 0, "text": "Clear"}}, "type": "value"},
+            {"options": {"1": {"color": "red", "index": 1, "text": "Trouble"}}, "type": "value"}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "red", "value": 1}]}
+        }
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 1},
+      "id": 103,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r.domain == \"binary_sensor\")\n  |> filter(fn: (r) => r.entity_id =~ /trouble/ and not (r.entity_id =~ /_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"value\")\n  |> last()\n  |> group()",
+          "refId": "A"
+        }
+      ],
+      "title": "System trouble",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Count of panel push events in the last 24 hours. Empty until the panel pushes its first event (the mock fires events when HA actions trigger panel state changes; a real panel pushes continuously).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue"}, {"color": "green", "value": 1}]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 1},
+      "id": 104,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r.domain == \"event\")\n  |> filter(fn: (r) => r._field == \"state\")\n  |> group()\n  |> count()",
+          "refId": "A"
+        }
+      ],
+      "title": "Events (24h)",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "id": 200,
+      "panels": [],
+      "title": "Security",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Arming state per area. Disarmed = green, day = teal, night = blue, away = orange, vacation = magenta, triggered = red, arming/pending = yellow.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"fillOpacity": 80, "lineWidth": 0},
+          "mappings": [
+            {"options": {"disarmed":             {"color": "#43aa8b", "text": "disarmed"}},      "type": "value"},
+            {"options": {"armed_home":           {"color": "#577590", "text": "armed home"}},     "type": "value"},
+            {"options": {"armed_night":          {"color": "#277da1", "text": "armed night"}},    "type": "value"},
+            {"options": {"armed_away":           {"color": "#f8961e", "text": "armed away"}},     "type": "value"},
+            {"options": {"armed_vacation":       {"color": "#a663cc", "text": "armed vacation"}}, "type": "value"},
+            {"options": {"armed_custom_bypass":  {"color": "#90be6d", "text": "armed custom"}},   "type": "value"},
+            {"options": {"arming":               {"color": "#f9c74f", "text": "arming"}},         "type": "value"},
+            {"options": {"pending":              {"color": "#f9c74f", "text": "pending"}},        "type": "value"},
+            {"options": {"triggered":            {"color": "#d62828", "text": "TRIGGERED"}},      "type": "value"}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "#6c757d"}]}
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7},
+      "id": 201,
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {"mode": "single"}
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"alarm_control_panel\")\n  |> filter(fn: (r) => r._field == \"state\")\n  |> filter(fn: (r) => not (r.entity_id =~ /_[0-9]+$/))\n  |> keep(columns: [\"_time\", \"_value\", \"entity_id\"])\n  |> group(columns: [\"entity_id\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Area arming state",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Push events the panel sent in the selected window. Columns: time, typed event_type, object index (zone / unit / area / user), and new_state for state-changed events.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "auto"},
+            "inspect": false
+          },
+          "thresholds": {"mode": "absolute", "steps": [{"color": "transparent"}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "event_type"},
+            "properties": [
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "basic"}},
+              {"id": "mappings", "value": [
+                {"options": {"alarm_activated":     {"color": "#d62828", "text": "alarm_activated"}},     "type": "value"},
+                {"options": {"alarm_cleared":       {"color": "#43aa8b", "text": "alarm_cleared"}},       "type": "value"},
+                {"options": {"ac_lost":             {"color": "#d62828", "text": "ac_lost"}},             "type": "value"},
+                {"options": {"ac_restored":         {"color": "#43aa8b", "text": "ac_restored"}},         "type": "value"},
+                {"options": {"battery_low":         {"color": "#f8961e", "text": "battery_low"}},         "type": "value"},
+                {"options": {"battery_restored":    {"color": "#43aa8b", "text": "battery_restored"}},    "type": "value"},
+                {"options": {"zone_state_changed":  {"color": "#577590", "text": "zone_state_changed"}},  "type": "value"},
+                {"options": {"unit_state_changed":  {"color": "#90be6d", "text": "unit_state_changed"}},  "type": "value"},
+                {"options": {"arming_changed":      {"color": "#f9c74f", "text": "arming_changed"}},      "type": "value"},
+                {"options": {"user_macro_button":   {"color": "#277da1", "text": "user_macro_button"}},   "type": "value"},
+                {"options": {"phone_line_dead":     {"color": "#f8961e", "text": "phone_line_dead"}},     "type": "value"},
+                {"options": {"phone_line_restored": {"color": "#43aa8b", "text": "phone_line_restored"}}, "type": "value"}
+              ]}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "_time"},
+            "properties": [
+              {"id": "custom.width", "value": 175},
+              {"id": "displayName", "value": "time"}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7},
+      "id": 202,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "time"}]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"event\")\n  |> filter(fn: (r) => r._field == \"new_state\" or r._field == \"unit_index\" or r._field == \"zone_index\" or r._field == \"area_index\" or r._field == \"user_index\" or r._field == \"alarm_type\" or r._field == \"button_index\")\n  |> pivot(rowKey: [\"_time\", \"event_type\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> drop(columns: [\"_start\", \"_stop\", \"_measurement\", \"domain\", \"entity_id\", \"event_class\"])\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 50)",
+          "refId": "A"
+        }
+      ],
+      "title": "Recent panel events",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Zone open/closed timeline. Painted segments = zone is_on (open / tripped).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"fillOpacity": 70, "lineWidth": 0},
+          "mappings": [
+            {"options": {"0": {"color": "green", "index": 0, "text": "secure"}}, "type": "value"},
+            {"options": {"1": {"color": "orange", "index": 1, "text": "open"}}, "type": "value"}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "orange", "value": 1}]}
+        }
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 15},
+      "id": 203,
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": false},
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "never",
+        "tooltip": {"mode": "single"}
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"binary_sensor\")\n  |> filter(fn: (r) => not (r.entity_id =~ /ac_power|battery|trouble|bypass|_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"value\")\n  |> keep(columns: [\"_time\", \"_value\", \"entity_id\"])\n  |> group(columns: [\"entity_id\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "Zone trip timeline",
+      "type": "state-timeline"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
+      "id": 300,
+      "panels": [],
+      "title": "Climate",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Current temperature per thermostat. Mock fixture values are raw panel format; a real panel reports °F.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "fixedColor": "#f1faee"},
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "opacity",
+            "lineInterpolation": "stepBefore",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "unit": "celsius"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byFrameRefID", "options": "A"},
+            "properties": [{"id": "color", "value": {"mode": "palette-classic-by-name"}}]
+          }
+        ]
+      },
+      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 24},
+      "id": 301,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"climate\")\n  |> filter(fn: (r) => not (r.entity_id =~ /_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"current_temperature\")\n  |> keep(columns: [\"_time\", \"_value\", \"entity_id\"])\n  |> group(columns: [\"entity_id\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Thermostat temperatures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "HVAC system mode per thermostat over the selected window. Off = grey, Heat = orange, Cool = blue, Auto = green, Dry = teal, Fan only = yellow.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {"fillOpacity": 80, "lineWidth": 0},
+          "mappings": [
+            {"options": {"off":      {"color": "#adb5bd", "text": "off"}},      "type": "value"},
+            {"options": {"heat":     {"color": "#f3722c", "text": "heat"}},     "type": "value"},
+            {"options": {"cool":     {"color": "#277da1", "text": "cool"}},     "type": "value"},
+            {"options": {"heat_cool":{"color": "#43aa8b", "text": "auto"}},     "type": "value"},
+            {"options": {"auto":     {"color": "#43aa8b", "text": "auto"}},     "type": "value"},
+            {"options": {"dry":      {"color": "#577590", "text": "dry"}},      "type": "value"},
+            {"options": {"fan_only": {"color": "#f9c74f", "text": "fan only"}}, "type": "value"}
+          ],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "#adb5bd"}]}
+        }
+      },
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 24},
+      "id": 302,
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {"mode": "single"}
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"climate\")\n  |> filter(fn: (r) => r._field == \"state\")\n  |> filter(fn: (r) => not (r.entity_id =~ /_[0-9]+$/))\n  |> keep(columns: [\"_time\", \"_value\", \"entity_id\"])\n  |> group(columns: [\"entity_id\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "HVAC mode",
+      "type": "state-timeline"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 33},
+      "id": 400,
+      "panels": [],
+      "title": "Activity",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Panel event rate, bucketed by event_type. Tracks zone state changes, button presses, alarm activation, AC/battery events, etc. Each event_type has its own color matching the events table.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "showPoints": "never",
+            "stacking": {"mode": "normal"}
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "alarm_activated"},     "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#d62828"}}]},
+          {"matcher": {"id": "byName", "options": "alarm_cleared"},       "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]},
+          {"matcher": {"id": "byName", "options": "ac_lost"},             "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#d62828"}}]},
+          {"matcher": {"id": "byName", "options": "ac_restored"},         "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]},
+          {"matcher": {"id": "byName", "options": "battery_low"},         "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#f8961e"}}]},
+          {"matcher": {"id": "byName", "options": "battery_restored"},    "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]},
+          {"matcher": {"id": "byName", "options": "zone_state_changed"},  "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#577590"}}]},
+          {"matcher": {"id": "byName", "options": "unit_state_changed"},  "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#90be6d"}}]},
+          {"matcher": {"id": "byName", "options": "arming_changed"},      "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#f9c74f"}}]},
+          {"matcher": {"id": "byName", "options": "user_macro_button"},   "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#277da1"}}]},
+          {"matcher": {"id": "byName", "options": "phone_line_dead"},     "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#f8961e"}}]},
+          {"matcher": {"id": "byName", "options": "phone_line_restored"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 34},
+      "id": 401,
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["sum"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"event\")\n  |> filter(fn: (r) => r._field == \"state\")\n  |> group(columns: [\"event_type\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: count, createEmpty: true)",
+          "refId": "A"
+        }
+      ],
+      "title": "Event rate by type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Top 15 most-toggled units in the selected window — bar length = number of state changes. Reveals which lights/relays get used most.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "#f9c74f", "value": null},
+              {"color": "#f8961e", "value": 5},
+              {"color": "#f3722c", "value": 15},
+              {"color": "#d62828", "value": 30}
+            ]
+          },
+          "min": 0,
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 34},
+      "id": 402,
+      "options": {
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^_value$/", "values": true},
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "namePlacement": "left"
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"light\")\n  |> filter(fn: (r) => not (r.entity_id =~ /_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"value\")\n  |> toFloat()\n  |> keep(columns: [\"_value\", \"entity_id\"])\n  |> group(columns: [\"entity_id\"])\n  |> count()\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> limit(n: 15)",
+          "refId": "A"
+        }
+      ],
+      "title": "Top toggled units (24h)",
+      "type": "bargauge"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 44},
+      "id": 500,
+      "panels": [],
+      "title": "Insights",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Zones currently bypassed. Bypass = the panel ignores this zone for arming/alarm purposes. Empty when nothing is bypassed; rows accrue when a switch is flipped.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "auto"},
+            "inspect": false
+          },
+          "thresholds": {"mode": "absolute", "steps": [{"color": "transparent"}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "entity_id"},
+            "properties": [
+              {"id": "displayName", "value": "zone bypass switch"},
+              {"id": "custom.cellOptions", "value": {"type": "color-text", "wrapText": false}},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "#f9c74f"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "_time"},
+            "properties": [
+              {"id": "displayName", "value": "since"},
+              {"id": "custom.width", "value": 175}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "_value"},
+            "properties": [{"id": "custom.hidden", "value": true}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 45},
+      "id": 501,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": true, "fields": "", "reducer": ["sum"], "show": true},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "since"}]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r.domain == \"switch\")\n  |> filter(fn: (r) => not (r.entity_id =~ /_[0-9]+$/))\n  |> filter(fn: (r) => r._field == \"value\")\n  |> last()\n  |> filter(fn: (r) => r._value > 0.0)\n  |> keep(columns: [\"_time\", \"_value\", \"entity_id\"])\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)",
+          "refId": "A"
+        }
+      ],
+      "title": "Active zone bypasses",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "User-macro button press events from the panel. Each row = one press; button_index identifies which scene/macro fired.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "custom": {
+            "align": "auto",
+            "cellOptions": {"type": "auto"},
+            "inspect": false
+          },
+          "thresholds": {"mode": "absolute", "steps": [{"color": "transparent"}]}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "button_index"},
+            "properties": [
+              {"id": "displayName", "value": "button #"},
+              {"id": "custom.cellOptions", "value": {"type": "color-background", "mode": "basic"}},
+              {"id": "color", "value": {"mode": "fixed", "fixedColor": "#277da1"}}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "_time"},
+            "properties": [
+              {"id": "displayName", "value": "time"},
+              {"id": "custom.width", "value": 175}
+            ]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 45},
+      "id": 502,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": true, "fields": "", "reducer": ["sum"], "show": true},
+        "showHeader": true,
+        "sortBy": [{"desc": true, "displayName": "time"}]
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"event\" and r.event_type == \"user_macro_button\")\n  |> filter(fn: (r) => r._field == \"button_index\")\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 25)\n  |> rename(columns: {_value: \"button_index\"})",
+          "refId": "A"
+        }
+      ],
+      "title": "Button press log",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+      "description": "Distribution of panel push events by typed kind across the selected window. Matches the colors used in the event rate and events table panels.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false}
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "alarm_activated"},     "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#d62828"}}]},
+          {"matcher": {"id": "byName", "options": "alarm_cleared"},       "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]},
+          {"matcher": {"id": "byName", "options": "ac_lost"},             "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#d62828"}}]},
+          {"matcher": {"id": "byName", "options": "ac_restored"},         "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]},
+          {"matcher": {"id": "byName", "options": "battery_low"},         "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#f8961e"}}]},
+          {"matcher": {"id": "byName", "options": "battery_restored"},    "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#43aa8b"}}]},
+          {"matcher": {"id": "byName", "options": "zone_state_changed"},  "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#577590"}}]},
+          {"matcher": {"id": "byName", "options": "unit_state_changed"},  "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#90be6d"}}]},
+          {"matcher": {"id": "byName", "options": "arming_changed"},      "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#f9c74f"}}]},
+          {"matcher": {"id": "byName", "options": "user_macro_button"},   "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "#277da1"}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 45},
+      "id": 503,
+      "options": {
+        "displayLabels": ["percent", "name"],
+        "legend": {"displayMode": "table", "placement": "right", "showLegend": true, "values": ["value"]},
+        "pieType": "donut",
+        "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false},
+        "tooltip": {"mode": "single", "sort": "none"}
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+          "query": "from(bucket: \"ha\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r.domain == \"event\" and r._field == \"state\")\n  |> keep(columns: [\"_time\", \"_value\", \"event_type\"])\n  |> group(columns: [\"event_type\"])\n  |> count(column: \"_value\")\n  |> map(fn: (r) => ({_time: now(), _value: r._value, event_type: r.event_type}))\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"event_type\"], valueColumn: \"_value\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Event distribution",
+      "type": "piechart"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["omni-pca", "hai", "omni-pro-ii", "home-assistant"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "influxdb", "uid": "InfluxDB"},
+        "definition": "from(bucket: \"ha\") |> range(start: -7d) |> filter(fn: (r) => r.domain == \"event\" and r._field == \"state\") |> keep(columns: [\"event_type\"]) |> group() |> distinct(column: \"event_type\")",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Event type",
+        "multi": true,
+        "name": "event_type",
+        "options": [],
+        "query": "from(bucket: \"ha\") |> range(start: -7d) |> filter(fn: (r) => r.domain == \"event\" and r._field == \"state\") |> keep(columns: [\"event_type\"]) |> group() |> distinct(column: \"event_type\")",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h"],
+    "time_options": ["1h", "6h", "24h", "2d", "7d", "30d"]
+  },
+  "timezone": "browser",
+  "title": "Omni Pro II — Panel Overview",
+  "uid": "omni-pro-ii-overview",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,0 +1,51 @@
+# Paste this block into your Home Assistant configuration.yaml.
+#
+# Prerequisites:
+#   1. The grafana stack from this directory is running:
+#        cd grafana/ && cp .env.example .env && docker compose up -d
+#   2. Your HA instance can reach the influxdb container on port 8086.
+#      Common patterns:
+#        - HA and InfluxDB on the same compose stack: use host=influxdb
+#        - HA and InfluxDB on different hosts: use host=<your-influx-ip>
+#        - HA on the host network, InfluxDB in docker: use
+#          host=host.docker.internal or the host's LAN IP
+#   3. Add `influxdb_token: <your INFLUX_TOKEN from .env>` to your
+#      secrets.yaml. Restart HA after editing both files.
+#
+# What this ships:
+#   - All state changes from omni_pca entities (alarm_control_panel,
+#     binary_sensor, climate, event, light, sensor, switch).
+#   - Event entity attributes carried as fields, including the typed
+#     event_class and event_data payload — so Flux queries can filter
+#     by alarm_type, zone_index, etc.
+#
+# Adjust the entity_globs filter if you also want non-omni entities in
+# the dashboard, or tighten it further to scope by area / device.
+
+influxdb:
+  api_version: 2
+  host: influxdb           # change to match your network layout
+  port: 8086
+  ssl: false
+  verify_ssl: false
+  token: !secret influxdb_token
+  organization: omni-pca
+  bucket: ha
+  precision: s
+
+  # Tag the typed event kind so Flux queries can filter by it cheaply.
+  tags_attributes:
+    - event_type
+    - event_class
+
+  include:
+    domains:
+      - alarm_control_panel
+      - binary_sensor
+      - climate
+      - event
+      - light
+      - sensor
+      - switch
+    entity_globs:
+      - "*omni*"           # scope to omni_pca entities only

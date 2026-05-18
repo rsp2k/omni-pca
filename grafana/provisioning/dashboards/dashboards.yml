@@ -1,0 +1,19 @@
+# Tells Grafana to scan /etc/grafana/provisioning/dashboards for
+# *.json dashboard files at boot. Picks up omni-pro-ii.json
+# automatically. Dashboards loaded this way are read-only in the UI;
+# the source of truth is the JSON in this directory.
+
+apiVersion: 1
+
+providers:
+  - name: omni-pca
+    orgId: 1
+    folder: ''
+    folderUid: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

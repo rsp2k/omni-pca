@@ -102,6 +102,74 @@ services:
         pip install --quiet --no-deps --upgrade /opt/omni-pca-src
         exec /init
 
+  # InfluxDB v2 + Grafana stack — kept inline rather than `extends:`-ing
+  # ../grafana/docker-compose.yml so this file stays self-contained and
+  # the named volumes get scoped to this compose project. The bundle
+  # compose stays the canonical ship-to-users version; we share its
+  # provisioning files via the volume mount on the grafana service.
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: omni-pca-dev-influxdb
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD}
+      DOCKER_INFLUXDB_INIT_ORG: omni-pca
+      DOCKER_INFLUXDB_INIT_BUCKET: ha
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
+      DOCKER_INFLUXDB_INIT_RETENTION: 30d
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    ports:
+      - "8086:8086"
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8086/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: omni-pca-dev-grafana
+    restart: unless-stopped
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_LOG_LEVEL: warn
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - default
+      - caddy
+    labels:
+      caddy: grafana-omni.juliet.warehack.ing
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:
+
 networks:
   caddy:
     external: true

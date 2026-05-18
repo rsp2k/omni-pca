@@ -70,6 +70,49 @@ OMNI_PCA_FIXTURE_KEY=0xC1A280B2   # or --pca-key on the command line
 buttons, programs, model byte, and firmware version from the file —
 everything the HA integration reads at discovery time.
 
+## Time-series & dashboards
+
+`docker compose up -d` also brings up **InfluxDB v2** (port 8086) and
+**Grafana** (port 3000). Open Grafana at <http://localhost:3000>
+(login: `admin` / `$GRAFANA_PASSWORD` from `.env`) — the **Omni Pro II
+— Panel Overview** dashboard loads automatically, pre-provisioned from
+[`../grafana/`](../grafana/), the shipping bundle.
+
+To wire HA → InfluxDB, append this block to `ha-config/configuration.yaml`
+(the directory is gitignored because it contains HA auth/state; the
+block lives in `../grafana/ha-snippet.yaml` for production users):
+
+```yaml
+influxdb:
+  api_version: 2
+  host: influxdb
+  port: 8086
+  ssl: false
+  verify_ssl: false
+  token: dev-token-omnipca-9472-fixed-for-dev-stack
+  organization: omni-pca
+  bucket: ha
+  precision: s
+  tags_attributes: [event_type, event_class]
+  include:
+    domains: [alarm_control_panel, binary_sensor, climate, event, light, sensor, switch]
+    entity_globs: ["*omni*"]
+```
+
+Restart HA (`docker compose restart homeassistant`) after editing.
+Within 30 seconds, panels start populating with live data.
+
+The dashboard JSON in `../grafana/provisioning/dashboards/` is the
+source of truth; edits in the Grafana UI don't persist (provisioned
+dashboards are read-only). Iterate by editing the JSON and running
+`docker compose restart grafana` — the provisioner picks up changes
+within ~30s.
+
+To exercise dashboard panels against the mock, trigger HA actions
+(arm an area, toggle a light): the mock pushes the resulting
+`SystemEvent` back to HA, which ships it to InfluxDB, which Grafana
+queries. Each step takes <1s.
+
 ## Notes
 
 - The HA container mounts `../custom_components/omni_pca/` read-only, so
